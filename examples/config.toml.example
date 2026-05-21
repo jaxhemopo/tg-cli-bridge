@@ -1,0 +1,48 @@
+# tg-cli-bridge example configuration.
+# Copy to ~/.config/tg-cli-bridge/config.toml and fill in your values.
+# Treat the real file as a secret — it contains your bot token.
+
+[telegram]
+# Token from @BotFather. /newbot to create one.
+bot_token = "PUT_YOUR_BOT_TOKEN_HERE"
+
+# Your numeric Telegram user ID. Message @userinfobot on Telegram to find it.
+# Only these IDs can send messages to your bot.
+allowed_user_ids = [123456789]
+
+
+[session]
+# Command to launch your agent CLI. Examples:
+#   "gemini --yolo"                          — Gemini CLI, auto-approve all tools
+#   "agy --dangerously-skip-permissions"     — AGY / Antigravity
+#   "claude"                                 — Claude Code
+#   "bash"                                   — plain shell (useful for testing)
+launch_command = "gemini --yolo"
+
+# Directory the agent launches in. Use a full path, ~ is not expanded.
+# Put a GEMINI.md (or equivalent) here to give the agent context about
+# what tools it has access to.
+working_dir = "/Users/YOUR_USERNAME/workspace"
+
+# Optional: override the PATH the agent process inherits.
+# Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
+# path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+[bridge]
+# Maximum characters per Telegram message. Telegram's hard limit is 4096.
+max_message_chars = 3800
+
+# Flag the CLI uses for a headless/non-interactive prompt.
+# Default is --prompt which works for Gemini CLI and Claude Code.
+# AGY uses --print.
+# prompt_flag = "--print"
+
+# Args appended to resume a previous session.
+# Default is ["--resume", "latest"] which works for Gemini CLI.
+# AGY uses ["--continue"].
+# resume_args = ["--continue"]
+
+# How long to wait for one agent invocation before killing it (seconds).
+# Default is 600 (10 minutes). Increase for very long-running tasks.
+# turn_timeout_seconds = 600

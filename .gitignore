@@ -1,0 +1,20 @@
+# Go
+tg-cli-bridge
+*.test
+*.out
+coverage.txt
+vendor/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local state
+*.log
+*.bak.*
+
+# User config — examples are tracked, real config never is
+config.toml
+!examples/config.toml*

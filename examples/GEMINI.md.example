@@ -1,0 +1,59 @@
+# Workspace context
+
+Working directory: `/Users/YOUR_USERNAME/workspace`
+
+---
+
+## Google Workspace — use `gws` CLI
+
+You have full access to Gmail, Drive, Calendar, and Sheets via the `gws` CLI.
+Run it with the shell tool. Auth is already set up — no login needed.
+
+### Gmail
+
+```bash
+# List recent unread threads
+gws gmail users threads list --params '{"userId":"me","maxResults":20,"q":"is:unread"}'
+
+# Get a full thread
+gws gmail users threads get --params '{"userId":"me","id":"THREAD_ID","format":"full"}'
+
+# Search emails
+gws gmail users messages list --params '{"userId":"me","q":"from:boss@company.com"}'
+```
+
+**Decoding email bodies** (base64url-encoded):
+```bash
+echo "BASE64URL_STRING" | python3 -c "import sys,base64; print(base64.urlsafe_b64decode(sys.stdin.read().strip()+'==').decode('utf-8','ignore'))"
+```
+
+### Google Drive
+
+```bash
+# List files
+gws drive files list --params '{"pageSize":20,"fields":"files(id,name,mimeType,modifiedTime)"}'
+
+# Export a Google Doc as plain text
+gws drive files export --params '{"fileId":"FILE_ID","mimeType":"text/plain"}' --output /tmp/doc.txt
+```
+
+### Google Calendar
+
+```bash
+# Upcoming events
+gws calendar events list --params '{"calendarId":"primary","maxResults":10,"orderBy":"startTime","singleEvents":true,"timeMin":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}'
+```
+
+### Sheets
+
+```bash
+# Read values
+gws sheets spreadsheets values get --params '{"spreadsheetId":"SHEET_ID","range":"Sheet1!A1:Z100"}'
+```
+
+---
+
+## Tips
+
+- Use `--page-all` on list commands to fetch all pages
+- Always confirm before sending emails or deleting calendar events
