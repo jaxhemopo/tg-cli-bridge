@@ -51,7 +51,7 @@ A working setup where:
 
 ```bash
 # 1. Build the binary (or go install for a released version)
-git clone https://github.com/jnhemopo/tg-cli-bridge.git
+git clone https://github.com/jaxhemopo/tg-cli-bridge.git
 cd tg-cli-bridge
 go build -o tg-cli-bridge ./cmd/tg-cli-bridge
 
@@ -116,4 +116,4 @@ the previous one.
 
 - Architecture and design rationale: `docs/architecture.md`
 - Troubleshooting catalogue: `docs/troubleshooting.md`
-- Repo: <https://github.com/jnhemopo/tg-cli-bridge>
+- Repo: <https://github.com/jaxhemopo/tg-cli-bridge>

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jnhemopo/tg-cli-bridge/internal/config"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/config"
 )
 
 func skipIfNoTmux(t *testing.T) {

@@ -13,9 +13,9 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/jnhemopo/tg-cli-bridge/internal/config"
-	"github.com/jnhemopo/tg-cli-bridge/internal/output"
-	"github.com/jnhemopo/tg-cli-bridge/internal/rpc"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/config"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/output"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/rpc"
 )
 
 // Bridge owns the bot and per-chat session state.

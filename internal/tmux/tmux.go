@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jnhemopo/tg-cli-bridge/internal/config"
-	"github.com/jnhemopo/tg-cli-bridge/internal/output"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/config"
+	"github.com/jaxhemopo/tg-cli-bridge/internal/output"
 )
 
 // Session manages a single named tmux session that hosts an agent CLI.

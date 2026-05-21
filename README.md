@@ -22,7 +22,7 @@ Phone (Telegram) ──HTTPS──► Telegram Bot API ──long-poll──► 
 
 ```bash
 # 1. Build
-git clone https://github.com/jnhemopo/tg-cli-bridge.git
+git clone https://github.com/jaxhemopo/tg-cli-bridge.git
 cd tg-cli-bridge
 go build -o tg-cli-bridge ./cmd/tg-cli-bridge
 

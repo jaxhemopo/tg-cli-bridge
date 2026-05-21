@@ -1,4 +1,4 @@
-module github.com/jnhemopo/tg-cli-bridge
+module github.com/jaxhemopo/tg-cli-bridge
 
 go 1.22
 
