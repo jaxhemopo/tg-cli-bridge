@@ -100,7 +100,7 @@ type CLIPreset struct {
 var KnownPresets = map[string]CLIPreset{
 	"gemini": {LaunchCmd: "gemini --yolo"},
 	"agy":    {LaunchCmd: "agy --dangerously-skip-permissions", PromptFlag: "--print", ResumeArgs: []string{"--continue"}},
-	"claude": {LaunchCmd: "claude", PromptFlag: "--print"},
+	"claude": {LaunchCmd: "claude --dangerously-skip-permissions", PromptFlag: "--print", ResumeArgs: []string{"--continue"}},
 }
 
 // UpdateCLI rewrites the CLI-specific fields in an existing config file while

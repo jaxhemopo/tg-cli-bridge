@@ -1,5 +1,6 @@
 # Go
-tg-cli-bridge
+# Anchored to repo root so it ignores the built binary, NOT the cmd/tg-cli-bridge/ source dir
+/tg-cli-bridge
 *.test
 *.out
 coverage.txt

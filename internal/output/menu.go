@@ -147,20 +147,34 @@ func DetectMenu(pane string) *Menu {
 	}
 
 	// Heuristic refinement:
-	// 1. If we have 3+ items, it's likely a menu even without a clear prompt.
+	// 1. If we have 3+ items, it's likely a menu even without a clear prompt,
+	//    PROVIDED it is at the very bottom (or followed only by help/prompts).
 	// 2. If we have only 2 items, we REQUIRE a clear prompt/help marker above
 	//    or a prompt/help marker below. This avoids misidentifying small
 	//    numbered lists in prose.
+
+	// Find where the last option was in our tail.
+	lastIdxInTail := -1
+	for idx, opt := range tail {
+		if opt.idx == bestRun[len(bestRun)-1].srcIdx {
+			lastIdxInTail = idx
+			break
+		}
+	}
+
+	// If there are any lines BELOW the menu, they MUST all be help/prompt lines.
+	// Otherwise it's likely just a static list in the middle of some prose.
+	if lastIdxInTail != -1 && lastIdxInTail < len(tail)-1 {
+		for i := lastIdxInTail + 1; i < len(tail); i++ {
+			if !isHelpOrPrompt(tail[i].line) {
+				return nil
+			}
+		}
+	}
+
 	if len(bestRun) == 2 && !hasPromptMarker {
 		// Check if there's a prompt below the items.
 		foundPromptBelow := false
-		lastIdxInTail := -1
-		for idx, opt := range tail {
-			if opt.idx == bestRun[len(bestRun)-1].srcIdx {
-				lastIdxInTail = idx
-				break
-			}
-		}
 		if lastIdxInTail != -1 {
 			for i := lastIdxInTail + 1; i < len(tail); i++ {
 				if isHelpOrPrompt(tail[i].line) {
@@ -191,7 +205,9 @@ func isHelpOrPrompt(line string) bool {
 		strings.Contains(lower, "cancel") ||
 		strings.Contains(lower, "amend") ||
 		strings.Contains(lower, "choose") ||
-		strings.Contains(lower, "select") {
+		strings.Contains(lower, "select") ||
+		strings.Contains(lower, "pick") ||
+		strings.HasSuffix(trimmed, ":") {
 		return true
 	}
 	return false
