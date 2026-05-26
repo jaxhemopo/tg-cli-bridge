@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -87,7 +88,7 @@ func isImage(ext string) bool {
 }
 
 // sendFiles uploads and sends the specified files to the Telegram chat.
-func (b *Bridge) sendFiles(chat int64, filePaths []string) {
+func (b *Bridge) sendFiles(ctx context.Context, chat int64, filePaths []string) {
 	const maxFiles = 5
 	sentCount := 0
 
@@ -97,7 +98,7 @@ func (b *Bridge) sendFiles(chat int64, filePaths []string) {
 		}
 
 		if sentCount >= maxFiles {
-			b.reply(chat, fmt.Sprintf("ℹ️ ...and %d other generated/modified files were found in the workspace.", len(filePaths)-sentCount))
+			b.reply(ctx, chat, fmt.Sprintf("ℹ️ ...and %d other generated/modified files were found in the workspace.", len(filePaths)-sentCount))
 			break
 		}
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -36,12 +37,18 @@ type Bridge struct {
 	// new reply.
 	lastOutput map[int64]string
 
-	// Active inline-keyboard menu, if any. Set when the agent's reply
-	// ended in a numbered options list.
-	activeMenu *activeMenu
+	// Per-chat active inline-keyboard menu, if any. Set when the agent's
+	// reply ended in a numbered options list.
+	activeMenus map[int64]*activeMenu
 
-	// Track running turns for command cancellation
+	// Track running turns for command cancellation.
 	runningCancels map[int64]context.CancelFunc
+	// Per-chat guard: true while a turn is in flight, to serialize turns.
+	running map[int64]bool
+	// Per-chat last user prompt, for /retry.
+	lastPrompt map[int64]string
+	// Per-chat chats that have disabled auto-sending agent-created files.
+	filesDisabled map[int64]bool
 }
 
 // activeMenu tracks a numbered menu currently shown as an inline keyboard.
@@ -69,7 +76,9 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	cmds := []tgbotapi.BotCommand{
 		{Command: "new", Description: "Start a fresh session"},
 		{Command: "cancel", Description: "Cancel the running command"},
+		{Command: "retry", Description: "Re-run your last message"},
 		{Command: "switch", Description: "Switch CLI: /switch " + strings.Join(names, " or /switch ")},
+		{Command: "files", Description: "Toggle auto-sending agent-created files (/files on|off)"},
 		{Command: "status", Description: "Show bridge state"},
 		{Command: "yes", Description: "Pick option 1 from a numbered menu"},
 		{Command: "help", Description: "List all commands"},
@@ -83,7 +92,11 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		bot:            bot,
 		sessions:       make(map[int64]bool),
 		lastOutput:     make(map[int64]string),
+		activeMenus:    make(map[int64]*activeMenu),
 		runningCancels: make(map[int64]context.CancelFunc),
+		running:        make(map[int64]bool),
+		lastPrompt:     make(map[int64]string),
+		filesDisabled:  make(map[int64]bool),
 	}
 	log.Printf("Bridge online (RPC mode). launch_command=%q", cfg.LaunchCommand)
 
@@ -137,7 +150,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	if _, ok := b.cfg.AllowedUserIDs[user.ID]; !ok {
 		log.Printf("Unauthorized message from user_id=%d", user.ID)
-		b.reply(msg.Chat.ID, "⚠️ Unauthorized.")
+		b.reply(ctx, msg.Chat.ID, "⚠️ Unauthorized.")
 		return
 	}
 
@@ -152,7 +165,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		attachmentPath, attachErr = b.handleIncomingFile(msg)
 		if attachErr != nil {
 			log.Printf("failed to handle incoming file: %v", attachErr)
-			b.reply(msg.Chat.ID, fmt.Sprintf("⚠️ Failed to download attachment: %v", attachErr))
+			b.reply(ctx, msg.Chat.ID, fmt.Sprintf("⚠️ Failed to download attachment: %v", attachErr))
 			return
 		}
 	}
@@ -180,6 +193,25 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 // -- one user turn = one CLI invocation -----------------------------------
 
 func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
+	// Serialize turns per chat: reject a new turn while one is in flight so
+	// concurrent invocations don't race the session/diff state or clobber the
+	// cancel handle.
+	b.mu.Lock()
+	if b.running[chat] {
+		b.mu.Unlock()
+		b.reply(ctx, chat, "⏳ Still working on your previous message. Send /cancel to stop it, or wait for it to finish.")
+		return
+	}
+	b.running[chat] = true
+	b.lastPrompt[chat] = prompt
+	filesOn := !b.filesDisabled[chat]
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.running, chat)
+		b.mu.Unlock()
+	}()
+
 	_, _ = b.bot.Request(tgbotapi.NewChatAction(chat, tgbotapi.ChatTyping))
 
 	// Post a single status bubble we'll edit in-place while the agent works,
@@ -210,33 +242,61 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		statusMu      sync.Mutex
 	)
 
-	// Keep the status bubble updated with elapsed time every 3 seconds.
+	// Update status bubble when the active tool/status changes (with 5-second throttling)
+	// and add the cancellation hint once at 30 seconds.
+	statusChanged := make(chan struct{}, 1)
 	statusDone := make(chan struct{})
 	go func() {
 		startTime := time.Now()
-		t := time.NewTicker(3 * time.Second)
+		var lastStatusLabel string
+		var lastEditTime time.Time
+		hintTimer := time.After(30 * time.Second)
+		hasHint := false
+
+		updateStatus := func(forceHint bool) {
+			statusMu.Lock()
+			lbl := currentStatus
+			statusMu.Unlock()
+
+			elapsed := time.Since(startTime)
+			showHint := hasHint || forceHint || elapsed >= 30*time.Second
+			if showHint {
+				hasHint = true
+			}
+
+			statusText := lbl
+			if showHint {
+				statusText += "\n\n💡 Send /cancel to stop this task."
+			}
+
+			if statusMsgID != 0 && (lbl != lastStatusLabel || forceHint) {
+				lastStatusLabel = lbl
+				lastEditTime = time.Now()
+				edit := tgbotapi.NewEditMessageText(chat, statusMsgID, statusText)
+				_, _ = b.bot.Request(edit)
+			}
+		}
+
+		// Initial state
+		lastStatusLabel = "⏳ Working…"
+
+		t := time.NewTicker(1 * time.Second)
 		defer t.Stop()
 
-		var lastStatusText string
+		var pendingUpdate bool
+
 		for {
 			select {
 			case <-statusDone:
 				return
+			case <-statusChanged:
+				pendingUpdate = true
+			case <-hintTimer:
+				updateStatus(true)
 			case <-t.C:
-				elapsed := time.Since(startTime).Round(time.Second)
-				statusMu.Lock()
-				lbl := currentStatus
-				statusMu.Unlock()
-
-				statusText := fmt.Sprintf("%s (%s elapsed)", lbl, elapsed)
-				if elapsed >= 30*time.Second {
-					statusText += "\n\n💡 Send /cancel to stop this task."
-				}
-
-				if statusText != lastStatusText && statusMsgID != 0 {
-					lastStatusText = statusText
-					edit := tgbotapi.NewEditMessageText(chat, statusMsgID, statusText)
-					_, _ = b.bot.Request(edit)
+				if pendingUpdate && time.Since(lastEditTime) >= 5*time.Second {
+					updateStatus(false)
+					pendingUpdate = false
 				}
 			}
 		}
@@ -259,8 +319,12 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		cancel()
 	}()
 
-	// Scan workspace before agent runs
-	preFiles := b.scanWorkspace()
+	// Snapshot workspace before the agent runs so we can detect files it
+	// creates. Skipped entirely when the chat has /files off.
+	var preFiles map[string]FileState
+	if filesOn {
+		preFiles = b.scanWorkspace()
+	}
 
 	res := rpc.Run(turnCtx, rpc.Options{
 		LaunchCommand: b.cfg.LaunchCommand,
@@ -274,8 +338,15 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		OnProgress: func(rawLine string) {
 			if s := statusFor(output.StripANSI(rawLine)); s != "" {
 				statusMu.Lock()
+				changed := (currentStatus != s)
 				currentStatus = s
 				statusMu.Unlock()
+				if changed {
+					select {
+					case statusChanged <- struct{}{}:
+					default:
+					}
+				}
 			}
 		},
 	})
@@ -308,7 +379,7 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 				errMsg += "\n" + truncate(res.Stderr, 400)
 			}
 		}
-		b.reply(chat, errMsg)
+		b.reply(ctx, chat, errMsg)
 		return
 	}
 
@@ -340,28 +411,61 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		}
 	}
 
-	// Scan workspace after agent runs for any newly created or modified files
-	postFiles := b.scanWorkspace()
-	var modifiedPaths []string
-	for path, post := range postFiles {
-		pre, exists := preFiles[path]
-		if !exists {
-			modifiedPaths = append(modifiedPaths, path)
-		} else if post.ModTime.After(pre.ModTime) {
-			modifiedPaths = append(modifiedPaths, path)
+	// Detect files the agent *created* this turn. We deliberately ignore
+	// merely-modified files (mtime bumps) so editing existing files like
+	// CLAUDE.md or touching a log doesn't spam them back to the chat.
+	var newPaths []string
+	if filesOn {
+		for path := range b.scanWorkspace() {
+			if _, existed := preFiles[path]; !existed {
+				newPaths = append(newPaths, path)
+			}
 		}
 	}
 
-	if body == "" {
-		b.reply(chat, "(no output)")
-	} else if menu := output.DetectMenu(body); menu != nil {
-		b.sendMenuReply(chat, body, menu)
-	} else {
-		b.sendBody(chat, body)
+	menu := output.DetectMenu(body)
+	switch {
+	case body == "":
+		b.reply(ctx, chat, "(no output)")
+	case menu != nil:
+		b.sendMenuReply(ctx, chat, body, menu)
+	case res.Err == nil && utf8.RuneCountInString(newRaw) > b.longReplyThreshold():
+		b.sendLongReplyFile(ctx, chat, newRaw)
+	default:
+		b.sendBody(ctx, chat, body)
 	}
 
-	if len(modifiedPaths) > 0 {
-		b.sendFiles(chat, modifiedPaths)
+	if len(newPaths) > 0 {
+		b.sendFiles(ctx, chat, newPaths)
+	}
+}
+
+// longReplyThreshold is the rune count above which a reply is sent as a file
+// attachment instead of being chunked into many messages.
+func (b *Bridge) longReplyThreshold() int {
+	max := b.cfg.MaxMessageChars
+	if max <= 0 {
+		max = 3800
+	}
+	return max * 3
+}
+
+// sendLongReplyFile ships a very long reply as a downloadable .md file plus a
+// short preview, instead of flooding the chat with many chunked messages.
+func (b *Bridge) sendLongReplyFile(ctx context.Context, chat int64, raw string) {
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("reply_%d.md", time.Now().UnixNano()))
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		log.Printf("long reply: write temp failed: %v; falling back to chunks", err)
+		b.sendBody(ctx, chat, b.formatReply(raw))
+		return
+	}
+	defer os.Remove(path)
+
+	doc := tgbotapi.NewDocument(chat, tgbotapi.FilePath(path))
+	doc.Caption = "📄 Long reply attached as a file.\n\n" + truncate(raw, 300)
+	if _, err := b.bot.Send(doc); err != nil {
+		log.Printf("long reply: send doc failed: %v; falling back to chunks", err)
+		b.sendBody(ctx, chat, b.formatReply(raw))
 	}
 }
 
@@ -420,16 +524,16 @@ func (b *Bridge) formatReply(s string) string {
 
 // sendBody chunks body into Telegram-safe pieces and ships each as
 // Telegram-flavour HTML so markdown formatting renders.
-func (b *Bridge) sendBody(chat int64, body string) {
+func (b *Bridge) sendBody(ctx context.Context, chat int64, body string) {
 	// body is already HTML (from formatReply).
 	for _, chunk := range output.SplitForTelegram(body, b.cfg.MaxMessageChars) {
 		m := tgbotapi.NewMessage(chat, chunk)
 		m.ParseMode = tgbotapi.ModeHTML
-		b.sendWithRetry(m)
+		b.sendWithRetry(ctx, m)
 	}
 }
 
-func (b *Bridge) sendWithRetry(c tgbotapi.Chattable) {
+func (b *Bridge) sendWithRetry(ctx context.Context, c tgbotapi.Chattable) {
 	for i := 0; i < 3; i++ {
 		_, err := b.bot.Send(c)
 		if err == nil {
@@ -441,8 +545,17 @@ func (b *Bridge) sendWithRetry(c tgbotapi.Chattable) {
 			if seconds == 0 {
 				seconds = 5
 			}
+			if seconds > 30 {
+				log.Printf("Rate limited (429) with long wait (%d seconds). Aborting retry.", seconds)
+				break
+			}
 			log.Printf("Rate limited (429). Retrying after %d seconds...", seconds)
-			time.Sleep(time.Duration(seconds) * time.Second)
+			select {
+			case <-ctx.Done():
+				log.Printf("Context cancelled while sleeping for rate limit retry: %v", ctx.Err())
+				return
+			case <-time.After(time.Duration(seconds) * time.Second):
+			}
 			continue
 		}
 
@@ -463,10 +576,10 @@ func (b *Bridge) sendWithRetry(c tgbotapi.Chattable) {
 // follow-up message carrying the numbered options as inline-keyboard
 // buttons. Tapping a button sends that number to the agent as the user's
 // next message.
-func (b *Bridge) sendMenuReply(chat int64, body string, menu *output.Menu) {
+func (b *Bridge) sendMenuReply(ctx context.Context, chat int64, body string, menu *output.Menu) {
 	prose := stripMenuLines(body, menu)
 	if strings.TrimSpace(prose) != "" {
-		b.sendBody(chat, prose)
+		b.sendBody(ctx, chat, prose)
 	}
 
 	text := buildMenuText(menu)
@@ -479,7 +592,7 @@ func (b *Bridge) sendMenuReply(chat int64, body string, menu *output.Menu) {
 		return
 	}
 	b.mu.Lock()
-	b.activeMenu = &activeMenu{
+	b.activeMenus[chat] = &activeMenu{
 		chatID:      chat,
 		messageID:   sent.MessageID,
 		fingerprint: menuFingerprint(menu),
@@ -529,13 +642,15 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 			names = append(names, "/switch "+k)
 		}
 		sort.Strings(names)
-		b.reply(chat,
+		b.reply(ctx, chat,
 			"✅ Bridge is live.\n"+
 				fmt.Sprintf("Running: %s\n\n", b.cfg.LaunchCommand)+
 				"Just send any text — I'll forward it to the agent and reply with what it says.\n\n"+
 				"Commands:\n"+
 				"/new — start a fresh session\n"+
 				"/cancel — cancel the running command\n"+
+				"/retry — re-run your last message\n"+
+				"/files on|off — toggle auto-sending files the agent creates\n"+
 				"/yes — pick option 1 from a numbered menu\n"+
 				"/status — show bridge state\n"+
 				strings.Join(names, ", ")+" — switch CLI")
@@ -543,29 +658,76 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.mu.Lock()
 		delete(b.sessions, chat)
 		delete(b.lastOutput, chat)
-		b.activeMenu = nil
+		delete(b.activeMenus, chat)
+		delete(b.lastPrompt, chat)
 		b.mu.Unlock()
-		b.reply(chat, "🆕 Session reset. Your next message starts fresh (no --resume).")
+		b.reply(ctx, chat, "🆕 Session reset. Your next message starts fresh (no --resume).")
 	case "cancel":
 		b.mu.Lock()
 		cancel, running := b.runningCancels[chat]
 		b.mu.Unlock()
 		if running && cancel != nil {
 			cancel()
-			b.reply(chat, "🛑 Command cancellation requested.")
+			b.reply(ctx, chat, "🛑 Command cancellation requested.")
 		} else {
-			b.reply(chat, "ℹ️ No command is currently running.")
+			b.reply(ctx, chat, "ℹ️ No command is currently running.")
+		}
+	case "retry":
+		b.mu.Lock()
+		last := b.lastPrompt[chat]
+		b.mu.Unlock()
+		if last == "" {
+			b.reply(ctx, chat, "ℹ️ Nothing to retry yet.")
+			return
+		}
+		b.runTurn(ctx, chat, last)
+	case "files":
+		arg := strings.ToLower(strings.TrimSpace(msg.CommandArguments()))
+		b.mu.Lock()
+		switch arg {
+		case "on":
+			delete(b.filesDisabled, chat)
+		case "off":
+			b.filesDisabled[chat] = true
+		case "":
+			disabled := b.filesDisabled[chat]
+			b.mu.Unlock()
+			state := "on"
+			if disabled {
+				state = "off"
+			}
+			b.reply(ctx, chat, fmt.Sprintf("📎 File auto-send is %s. Use /files on or /files off.", state))
+			return
+		default:
+			b.mu.Unlock()
+			b.reply(ctx, chat, "Usage: /files on  or  /files off")
+			return
+		}
+		on := !b.filesDisabled[chat]
+		b.mu.Unlock()
+		if on {
+			b.reply(ctx, chat, "📎 File auto-send enabled — I'll send back files the agent newly creates.")
+		} else {
+			b.reply(ctx, chat, "🔕 File auto-send disabled.")
 		}
 	case "status":
 		b.mu.Lock()
 		active := b.sessions[chat]
+		busy := b.running[chat]
+		filesOff := b.filesDisabled[chat]
 		b.mu.Unlock()
 		state := "🟢 ready"
-		if active {
-			state += " (resumed)"
+		if busy {
+			state = "⏳ running a command"
+		} else if active {
+			state = "🟢 ready (resumed)"
 		}
-		b.reply(chat, fmt.Sprintf("Launch: %s\nSession: %s",
-			b.cfg.LaunchCommand, state))
+		files := "on"
+		if filesOff {
+			files = "off"
+		}
+		b.reply(ctx, chat, fmt.Sprintf("Launch: %s\nSession: %s\nFile auto-send: %s",
+			b.cfg.LaunchCommand, state, files))
 	case "yes", "y":
 		// Shorthand for picking option 1 in a numbered menu.
 		b.runTurn(ctx, chat, "1")
@@ -577,7 +739,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 				names = append(names, k)
 			}
 			sort.Strings(names)
-			b.reply(chat, "Usage: /switch "+strings.Join(names, "  or  /switch "))
+			b.reply(ctx, chat, "Usage: /switch "+strings.Join(names, "  or  /switch "))
 			return
 		}
 		preset, ok := config.KnownPresets[arg]
@@ -587,18 +749,26 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 				names = append(names, k)
 			}
 			sort.Strings(names)
-			b.reply(chat, "Unknown CLI \""+arg+"\". Available: "+strings.Join(names, ", "))
+			b.reply(ctx, chat, "Unknown CLI \""+arg+"\". Available: "+strings.Join(names, ", "))
 			return
 		}
 		if err := config.UpdateCLI(b.cfg.SourcePath, preset); err != nil {
-			b.reply(chat, "❌ Failed to update config: "+err.Error())
+			b.reply(ctx, chat, "❌ Failed to update config: "+err.Error())
 			return
 		}
-		b.reply(chat, fmt.Sprintf("✅ Switched to %s. Restarting…\nSend /new after it comes back.", arg))
+		// We rely on os.Exit + LaunchAgent KeepAlive to restart with the new
+		// config. If we're NOT running under launchd (ppid 1) — e.g. a
+		// foreground `tg-cli-bridge run` — exiting would just kill the bridge
+		// with no restart, so update the config and tell the user to restart.
+		if os.Getppid() != 1 {
+			b.reply(ctx, chat, fmt.Sprintf("✅ Config switched to %s, but I'm not running under launchd so I can't auto-restart. Restart me to apply it (then send /new).", arg))
+			return
+		}
+		b.reply(ctx, chat, fmt.Sprintf("✅ Switched to %s. Restarting…\nSend /new after it comes back.", arg))
 		time.Sleep(600 * time.Millisecond) // let the reply flush before exit
 		os.Exit(0)                          // LaunchAgent KeepAlive restarts with new config
 	default:
-		b.reply(chat, "Unknown command. Try /help.")
+		b.reply(ctx, chat, "Unknown command. Try /help.")
 	}
 }
 
@@ -623,11 +793,16 @@ func (b *Bridge) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery)
 		_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, ""))
 		return
 	}
+	if cb.Message == nil {
+		_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, ""))
+		return
+	}
 
+	chat := cb.Message.Chat.ID
 	b.mu.Lock()
-	active := b.activeMenu
+	active := b.activeMenus[chat]
 	b.mu.Unlock()
-	if active == nil || cb.Message == nil || active.messageID != cb.Message.MessageID {
+	if active == nil || active.messageID != cb.Message.MessageID {
 		_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, "This menu is no longer active."))
 		return
 	}
@@ -646,52 +821,60 @@ func (b *Bridge) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery)
 	_, _ = b.bot.Request(edit)
 
 	b.mu.Lock()
-	b.activeMenu = nil
+	delete(b.activeMenus, chat)
 	b.mu.Unlock()
 
 	// Now treat the choice as a normal turn so the agent advances.
-	b.runTurn(ctx, active.chatID, strconv.Itoa(num))
+	b.runTurn(ctx, chat, strconv.Itoa(num))
 }
 
 // -- helpers ---------------------------------------------------------------
 
 // statusFor maps a single (ANSI-stripped) output line to a human-readable
 // status label, or "" if the line doesn't indicate anything interesting.
+//
+// It matches structured tool-call markers of the form name(… — the way most
+// agent CLIs print tool invocations (e.g. "● Bash(…)", "Read(…)") — rather
+// than loose keywords. Loose matching (e.g. any line containing "message" or
+// "running") produced misleading status labels on ordinary prose.
 func statusFor(line string) string {
 	low := strings.ToLower(line)
 	switch {
-	case containsAny(low, "gmail", "email", "mail", "inbox", "thread", "message"):
+	case hasToolCall(low, "gmail", "search_threads", "list_drafts", "get_thread"):
 		return "📧 Checking email…"
-	case containsAny(low, "gdrive", "google drive", "drive", "gdoc", "gsheet", "spreadsheet", "document"):
+	case hasToolCall(low, "drive", "google_drive", "list_recent_files", "read_file_content"):
 		return "📁 Browsing Drive…"
-	case containsAny(low, "calendar", "event", "schedule"):
+	case hasToolCall(low, "calendar", "list_events", "create_event"):
 		return "📅 Checking calendar…"
-	case containsAny(low, "readfile", "read_file", "reading"):
+	case hasToolCall(low, "read", "readfile", "read_file", "cat", "view"):
 		return "📖 Reading files…"
-	case containsAny(low, "writefile", "write_file", "editfile", "edit_file", "creating file", "writing"):
+	case hasToolCall(low, "write", "writefile", "write_file", "edit", "edit_file", "str_replace", "create_file"):
 		return "✏️ Writing files…"
-	case containsAny(low, "shell(", "bash(", "runcmd", "execute", "running"):
+	case hasToolCall(low, "bash", "shell", "run_terminal", "execute", "exec_command"):
 		return "⚙️ Running commands…"
-	case containsAny(low, "web_search", "googlesearch", "searching", "research"):
+	case hasToolCall(low, "websearch", "web_search", "google_search", "search"):
 		return "🔍 Searching…"
-	case containsAny(low, "fetch", "http", "download", "request"):
+	case hasToolCall(low, "webfetch", "web_fetch", "fetch", "http_request"):
 		return "🌐 Fetching…"
 	default:
 		return ""
 	}
 }
 
-func containsAny(s string, needles ...string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
+// hasToolCall reports whether the line invokes one of the named tools, i.e.
+// contains "name(" — the call syntax — for any name. Requiring the opening
+// paren avoids matching the same word used in ordinary prose.
+func hasToolCall(line string, names ...string) bool {
+	for _, n := range names {
+		if strings.Contains(line, n+"(") {
 			return true
 		}
 	}
 	return false
 }
 
-func (b *Bridge) reply(chat int64, text string) {
-	b.sendWithRetry(tgbotapi.NewMessage(chat, text))
+func (b *Bridge) reply(ctx context.Context, chat int64, text string) {
+	b.sendWithRetry(ctx, tgbotapi.NewMessage(chat, text))
 }
 
 func truncate(s string, max int) string {
@@ -754,6 +937,13 @@ func (b *Bridge) handleIncomingFile(msg *tgbotapi.Message) (string, error) {
 		fileName = fmt.Sprintf("photo_%d.jpg", time.Now().Unix())
 	} else {
 		return "", nil
+	}
+
+	// Never trust the Telegram-supplied name as a path: strip any directory
+	// components so a name like "../../foo" can't escape the uploads dir.
+	fileName = filepath.Base(filepath.Clean("/" + fileName))
+	if fileName == "" || fileName == "/" || fileName == "." {
+		fileName = fmt.Sprintf("file_%d", time.Now().Unix())
 	}
 
 	uploadsDir := filepath.Join(b.cfg.WorkingDir, "telegram_uploads")
