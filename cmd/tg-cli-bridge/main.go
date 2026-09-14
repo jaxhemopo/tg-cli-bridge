@@ -1,5 +1,5 @@
-// Command tg-cli-bridge bridges a persistent agentic CLI (Antigravity, Gemini,
-// Claude Code, plain shell) to a Telegram chat.
+// Command tg-cli-bridge connects an agentic CLI (AGY, Claude Code, Codex, or a
+// custom command) to a Telegram chat.
 //
 // Subcommands:
 //
@@ -94,7 +94,7 @@ func run(args []string) int {
 		printUsage(os.Stdout)
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
+		_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		printUsage(os.Stderr)
 		return 1
 	}
@@ -106,15 +106,11 @@ func run(args []string) int {
 type cliPreset struct {
 	label      string
 	launchCmd  string
-	promptFlag string   // empty = use default (--prompt)
+	promptFlag string   // empty = use default (--prompt); "--" supports a positional prompt
 	resumeArgs []string // nil = use default (["--resume","latest"])
 }
 
 var cliPresets = []cliPreset{
-	{
-		label:     "Gemini CLI  (gemini --yolo)",
-		launchCmd: "gemini --yolo",
-	},
 	{
 		label:      "AGY / Antigravity  (agy --dangerously-skip-permissions)",
 		launchCmd:  "agy --dangerously-skip-permissions",
@@ -126,6 +122,12 @@ var cliPresets = []cliPreset{
 		launchCmd:  "claude --dangerously-skip-permissions",
 		promptFlag: "--print",
 		resumeArgs: []string{"--continue"},
+	},
+	{
+		label:      "Codex CLI  (codex exec --sandbox workspace-write)",
+		launchCmd:  "codex exec --sandbox workspace-write",
+		promptFlag: "--",
+		resumeArgs: []string{"resume", "--last"},
 	},
 	{
 		label: "Other / custom",
@@ -142,7 +144,7 @@ func cmdInit(path string, args []string) int {
 		path = config.DefaultPath()
 	}
 	if _, err := os.Stat(path); err == nil && !*force {
-		fmt.Fprintf(os.Stderr, "error: %s already exists. Pass --force to overwrite.\n", path)
+		_, _ = fmt.Fprintf(os.Stderr, "error: %s already exists. Pass --force to overwrite.\n", path)
 		return 1
 	}
 
@@ -176,9 +178,11 @@ func cmdInit(path string, args []string) int {
 	if preset.launchCmd == "" {
 		// "Other" — ask manually.
 		preset.launchCmd = prompt(r, "Launch command", "", true)
-		preset.promptFlag = prompt(r, "Prompt flag (flag the CLI uses for headless mode)", "--prompt", false)
+		preset.promptFlag = prompt(r, "Prompt flag (use -- for a positional prompt)", "--prompt", false)
 		resumeRaw := prompt(r, "Resume arg (flag to continue a session, or leave blank)", "", false)
-		if resumeRaw != "" {
+		if resumeRaw == "" {
+			preset.resumeArgs = []string{}
+		} else {
 			preset.resumeArgs = strings.Fields(resumeRaw)
 		}
 	}
@@ -245,7 +249,7 @@ func cmdInstall(cfgPath string) int {
 		cfgPath = config.DefaultPath()
 	}
 	if _, err := os.Stat(cfgPath); err != nil {
-		fmt.Fprintf(os.Stderr,
+		_, _ = fmt.Fprintf(os.Stderr,
 			"error: config not found at %s. Run `tg-cli-bridge init` first.\n", cfgPath)
 		return 1
 	}
@@ -322,7 +326,7 @@ func cmdLogs(cfgPath string) int {
 	}
 	logPath := filepath.Join(filepath.Dir(cfg.SourcePath), "bridge.log")
 	if _, err := os.Stat(logPath); err != nil {
-		fmt.Fprintf(os.Stderr, "no log file at %s\n", logPath)
+		_, _ = fmt.Fprintf(os.Stderr, "no log file at %s\n", logPath)
 		return 1
 	}
 	// exec tail so Ctrl-C feels native.
@@ -398,7 +402,7 @@ func prompt(r *bufio.Reader, label, defaultVal string, required bool) string {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, `tg-cli-bridge — bridge any agentic CLI to a Telegram chat.
+	_, _ = fmt.Fprintf(w, `tg-cli-bridge — bridge any agentic CLI to a Telegram chat.
 
 Usage:
   tg-cli-bridge [--config PATH] <command> [args]

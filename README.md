@@ -1,8 +1,8 @@
 # tg-cli-bridge
 
-Control AGY, Gemini CLI, or Claude Code from your phone via Telegram. Send a
-message, get a clean reply back. Drive long-running tasks, check your email,
-manage files — all without opening your laptop.
+Control AGY, Claude Code, Codex, or another headless agent CLI from your phone
+via Telegram. Send a message and get a clean reply back without opening your
+laptop.
 
 A single static Go binary. No Python, no venv, no Docker.
 
@@ -11,7 +11,7 @@ Phone (Telegram) ──HTTPS──► Telegram Bot API ──long-poll──► 
                                                                    │
                                                         spawn once │
                                                                    ▼
-                                   agy --dangerously-skip-permissions --print --continue "<text>"
+                                   agy --dangerously-skip-permissions [--continue] --print "<text>"
                                                                    │
                                                        stdout      │  exit
                                                                    ▼
@@ -20,22 +20,24 @@ Phone (Telegram) ──HTTPS──► Telegram Bot API ──long-poll──► 
 
 ## ⚠️ Security — read this first
 
-This bridge runs your agent CLI with **all tool approvals disabled**
-(`--dangerously-skip-permissions` for AGY, `--yolo` for Gemini). That means
-the agent can run shell commands, read and write files, and make network
-requests **without asking you first** — the same as running it locally in
-auto-approve mode.
+The AGY and Claude presets run with **all tool approvals disabled** via
+`--dangerously-skip-permissions`. The Codex preset uses its `workspace-write`
+sandbox. These agents can run commands and change files without a confirmation
+round-trip through Telegram.
 
 **What protects you:**
 
 - `allowed_user_ids` in `config.toml` — only these Telegram IDs can send
   prompts to your bot. Keep this to just your own ID.
-- Your bot token — if someone has it, they can impersonate any user to your
-  bot. Treat it like a password. Never commit it, never share it.
+- Use the bot only in a private Telegram chat. The allowlist checks the sender,
+  but replies sent from an allowed user in a group are visible to that group.
+- Your bot token — if someone has it, they can control the bot, receive its
+  updates, and send messages as the bot. Treat it like a password. Never
+  commit it, never share it.
 
-**Be deliberate about what you ask remotely.** The agent acts with your local
-user's full permissions. Don't leave the bridge running on a machine you
-wouldn't otherwise leave unlocked.
+**Be deliberate about what you ask remotely.** AGY and Claude act with your
+local user's full permissions; Codex acts within its configured sandbox. Don't
+leave the bridge running on a machine you wouldn't otherwise leave unlocked.
 
 ---
 
@@ -55,37 +57,70 @@ go build -o tg-cli-bridge ./cmd/tg-cli-bridge
 # Send /start to your bot from Telegram. Ctrl-C when happy.
 
 # 4. Install as a background service (macOS)
-tg-cli-bridge install
-tg-cli-bridge status
+./tg-cli-bridge install
+./tg-cli-bridge status
 ```
 
 ## How it works
 
-Each Telegram message spawns the agent CLI once in headless mode:
+Each Telegram message spawns the agent CLI once in headless mode. For example,
+an AGY turn after the first one runs:
 
 ```
-agy --dangerously-skip-permissions --print --continue "check my email"
+agy --dangerously-skip-permissions --continue --print "check my email"
 ```
 
 The bridge waits for the process to exit, strips tool-call noise from the
 output, and sends back only the agent's natural-language reply. Session
-continuity is preserved via `--continue` (AGY) or `--resume latest` (Gemini)
-so the agent remembers the conversation across messages.
+continuity uses each CLI's own latest-session argument: `--continue` for AGY
+and Claude, or `exec resume --last` for Codex.
 
 While the agent works, the bridge posts a single status bubble that edits
-itself in-place — `📧 Checking email…`, `📁 Browsing Drive…` — and deletes
-it the moment the real reply is ready.
+itself in-place when the CLI reports recognizable progress on stdout —
+`📧 Checking email…`, `📁 Browsing Drive…` — and deletes it when the reply is
+ready. Codex sends progress to stderr, so Codex turns keep the generic
+`⏳ Working…` bubble until the final answer arrives.
+
+### Session isolation — important
+
+The bridge remembers whether a Telegram chat has started, but it does not yet
+store the CLI's conversation ID. AGY `--continue`, Claude `--continue`, and
+Codex `exec resume --last` select that engine's most recent session — not a
+session uniquely tied to a Telegram chat.
+
+Until per-engine session-ID tracking is added:
+
+- Use one CLI engine and one Telegram chat per running bridge.
+- Dedicate each bot/config to one engine when you maintain more than one bot.
+- Do not run that same CLI manually in the configured `working_dir` while the
+  bridge is active.
+- Do not run different engines against the same working directory at the same
+  time, even though their conversation stores are separate.
+- Wait for the current turn to finish before `/switch`, then send `/new`.
+
+The supported macOS setup is one background bridge at a time because the
+installer manages one LaunchAgent identity. If you maintain a Claude bot
+(`tg1`) and an AGY bot (`tg2`), stop one before starting the other. Concurrent
+bots require separate tokens, configs, working directories, and manually
+managed service identities; the bundled installer does not set those up.
 
 ## Supported CLIs
 
 The `init` wizard knows the right flags for each CLI out of the box.
 
-| CLI | launch_command | Notes |
-|-----|---------------|-------|
-| **AGY / Antigravity** | `agy --dangerously-skip-permissions` | Auto-approves all tools |
-| Gemini CLI | `gemini --yolo` | Auto-approves all tools |
-| Claude Code | `claude` | Requires manual tool approval unless `--dangerously-skip-permissions` is set |
-| Plain shell | `bash` | Useful for testing |
+| CLI | `launch_command` | Prompt | Resume |
+|-----|------------------|--------|--------|
+| **AGY / Antigravity** | `agy --dangerously-skip-permissions` | `--print` | `--continue` |
+| Claude Code | `claude --dangerously-skip-permissions` | `--print` | `--continue` |
+| Codex CLI | `codex exec --sandbox workspace-write` | positional (`--`) | `resume --last` |
+| Other / custom | Your headless command | CLI-specific | CLI-specific |
+
+Codex normally requires `working_dir` to be a Git repository. Add
+`--skip-git-repo-check` to its `launch_command` only when you deliberately want
+to run elsewhere. Its `workspace-write` sandbox blocks outbound network access
+by default; if Codex must call networked tools, deliberately add
+`-c sandbox_workspace_write.network_access=true` to `launch_command`. See the
+official [Codex non-interactive mode documentation](https://developers.openai.com/codex/noninteractive).
 
 ## Switching CLIs from Telegram
 
@@ -93,13 +128,14 @@ You can switch live without touching the terminal:
 
 ```
 /switch agy
-/switch gemini
 /switch claude
+/switch codex
 ```
 
-The bridge updates `config.toml`, restarts itself, and comes back on the new
-CLI within a few seconds. Send `/new` after switching to clear the previous
-session state.
+The bridge updates `config.toml`. When managed by the bundled LaunchAgent it
+restarts automatically and comes back on the new CLI within a few seconds; in
+foreground mode you restart it manually. Switching is global, not per
+Telegram chat. Finish the current turn first and send `/new` after switching.
 
 ## Telegram commands
 
@@ -107,9 +143,12 @@ Send any plain text and it's forwarded to the agent as a prompt.
 
 | Command | What it does |
 |---------|-------------|
-| `/new` | Start a fresh session (forget conversation history) |
-| `/switch <name>` | Switch CLI live — `agy`, `gemini`, or `claude` |
-| `/status` | Show current CLI and service state |
+| `/new` | Make the next message start without resume arguments |
+| `/cancel` | Cancel the command currently running in this chat |
+| `/retry` | Re-run the last message from this chat |
+| `/files on\|off` | Toggle automatic sending of newly created files |
+| `/switch <name>` | Switch CLI globally — `agy`, `claude`, or `codex` |
+| `/status` | Show the current CLI and this chat's bridge state |
 | `/yes` | Shorthand for sending "1" to a numbered menu |
 | `/help` | List all commands |
 
@@ -136,15 +175,55 @@ resume_args         = ["--continue"]
 
 **The config contains your bot token — treat it like a password. Never commit it.**
 
+### Custom CLIs and model arguments
+
+For each Telegram turn, the bridge constructs the command in this order:
+
+```text
+<launch_command> [resume_args after the first turn] <prompt_flag> <Telegram prompt>
+```
+
+Put fixed engine, model, profile, and permission arguments in
+`launch_command`. For example:
+
+```toml
+# AGY
+launch_command = "agy --dangerously-skip-permissions --model YOUR_MODEL --effort high"
+
+# Claude Code
+launch_command = "claude --dangerously-skip-permissions --model YOUR_MODEL"
+
+# Codex
+launch_command = "codex exec --sandbox workspace-write --model YOUR_MODEL"
+
+# Codex with outbound access for networked tools
+launch_command = "codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --model YOUR_MODEL"
+```
+
+Set `prompt_flag` to the CLI's one-shot/headless flag (`--print`, `--prompt`,
+or similar). If the prompt is positional, set `prompt_flag = "--"` so option
+parsing ends safely before the Telegram text. Set `resume_args` to exactly the
+arguments that continue the engine's latest session. Check the installed
+CLI's `--help`, test one new turn and one resumed turn directly in a terminal,
+then send `/new` after changing any of these values.
+
+For a CLI with no continuation support, set `resume_args = []`; every message
+will start a separate CLI session.
+
+`launch_command` is split into arguments; it is not run through a shell. Avoid
+pipes, redirects, environment assignments, and quoted arguments containing
+spaces.
+
 ## Context files
 
-Put a `CLAUDE.md` or `GEMINI.md` in your `working_dir` to give the agent
-context about what tools are available, how to use them, and any workspace
-conventions. The bridge sets that directory as the working directory for every
-invocation so the agent picks it up automatically.
+Put the context file recognized by your engine in `working_dir` — for example,
+`AGENTS.md` for Codex or `CLAUDE.md` for Claude Code — to describe available
+tools and workspace conventions. The bridge uses that directory for every
+invocation.
 
-See `examples/GEMINI.md.example` for a Google Workspace template (Gmail,
-Drive, Calendar, Sheets via the `gws` CLI).
+See `examples/WORKSPACE_CONTEXT.md.example` for a context template covering
+Gmail, Drive, Calendar, and Sheets through the `gws` CLI. Copy its contents to
+the instruction file your engine recognizes.
 
 ## CLI commands
 
@@ -163,8 +242,8 @@ Drive, Calendar, Sheets via the `gws` CLI).
 The original version ran the agent in a persistent tmux session and diffed the
 pane every 0.6 seconds to detect new output. Two problems:
 
-1. **Telegram rate limits.** Gemini CLI redraws its screen on every token. The
-   bridge treated each redraw as new output and fired a Telegram message.
+1. **Telegram rate limits.** Interactive CLIs redraw their screens frequently.
+   The bridge treated each redraw as new output and fired a Telegram message.
    Telegram throttles to ~1 message/second; the bridge had no backoff and
    dropped responses.
 
@@ -178,7 +257,8 @@ filtered before the reply is sent.
 
 - macOS (LaunchAgent install). Linux works with a manual systemd user unit.
 - Go 1.22+
-- The agent CLI you want to drive (AGY, Gemini CLI, Claude Code, etc.)
+- The agent CLI you want to drive (AGY, Claude Code, Codex, or another
+  headless CLI)
 
 ## License
 

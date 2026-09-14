@@ -22,7 +22,8 @@ import (
 	"github.com/jaxhemopo/tg-cli-bridge/internal/rpc"
 )
 
-// Bridge owns the bot and per-chat session state.
+// Bridge owns the bot and per-chat runtime bookkeeping. The CLI's actual
+// conversation IDs are not tracked; see the session-isolation notes in README.
 type Bridge struct {
 	cfg *config.Config
 	bot *tgbotapi.BotAPI
@@ -161,7 +162,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	var attachmentPath string
 	var attachErr error
-	if msg.Photo != nil || msg.Document != nil {
+	if len(msg.Photo) > 0 || msg.Document != nil {
 		attachmentPath, attachErr = b.handleIncomingFile(msg)
 		if attachErr != nil {
 			log.Printf("failed to handle incoming file: %v", attachErr)
@@ -171,7 +172,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 
 	if text == "" && attachmentPath != "" {
-		if msg.Photo != nil {
+		if len(msg.Photo) > 0 {
 			text = "Describe and analyze this image."
 		} else {
 			text = "Analyze this file."
@@ -459,7 +460,7 @@ func (b *Bridge) sendLongReplyFile(ctx context.Context, chat int64, raw string) 
 		b.sendBody(ctx, chat, b.formatReply(raw))
 		return
 	}
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	doc := tgbotapi.NewDocument(chat, tgbotapi.FilePath(path))
 	doc.Caption = "📄 Long reply attached as a file.\n\n" + truncate(raw, 300)
@@ -766,7 +767,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 		}
 		b.reply(ctx, chat, fmt.Sprintf("✅ Switched to %s. Restarting…\nSend /new after it comes back.", arg))
 		time.Sleep(600 * time.Millisecond) // let the reply flush before exit
-		os.Exit(0)                          // LaunchAgent KeepAlive restarts with new config
+		os.Exit(0)                         // LaunchAgent KeepAlive restarts with new config
 	default:
 		b.reply(ctx, chat, "Unknown command. Try /help.")
 	}
@@ -888,7 +889,7 @@ func truncate(s string, max int) string {
 func menuFingerprint(m *output.Menu) string {
 	var sb strings.Builder
 	for _, opt := range m.Options {
-		fmt.Fprintf(&sb, "%d:%s\n", opt.Number, opt.Label)
+		_, _ = fmt.Fprintf(&sb, "%d:%s\n", opt.Number, opt.Label)
 	}
 	return sb.String()
 }
@@ -900,7 +901,7 @@ func buildMenuText(m *output.Menu) string {
 		sb.WriteString("\n\n")
 	}
 	for _, opt := range m.Options {
-		fmt.Fprintf(&sb, "%d. %s\n", opt.Number, opt.Label)
+		_, _ = fmt.Fprintf(&sb, "%d. %s\n", opt.Number, opt.Label)
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -931,7 +932,7 @@ func (b *Bridge) handleIncomingFile(msg *tgbotapi.Message) (string, error) {
 	if msg.Document != nil {
 		fileID = msg.Document.FileID
 		fileName = msg.Document.FileName
-	} else if msg.Photo != nil && len(msg.Photo) > 0 {
+	} else if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		fileID = photo.FileID
 		fileName = fmt.Sprintf("photo_%d.jpg", time.Now().Unix())
@@ -962,17 +963,19 @@ func (b *Bridge) handleIncomingFile(msg *tgbotapi.Message) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("downloading file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	destPath := filepath.Join(uploadsDir, fileName)
 	out, err := os.Create(destPath)
 	if err != nil {
 		return "", fmt.Errorf("creating local file: %w", err)
 	}
-	defer out.Close()
-
 	if _, err := io.Copy(out, resp.Body); err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("saving file content: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("closing local file: %w", err)
 	}
 
 	return destPath, nil

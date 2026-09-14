@@ -4,7 +4,7 @@
 // This is the simple replacement for the tmux+watcher+diff streaming design.
 // Each Telegram message becomes one process invocation:
 //
-//	gemini --yolo --resume latest --prompt "<text>"
+//	agy --dangerously-skip-permissions --continue --print "<text>"
 //
 // The bridge waits for the process to exit and ships the captured stdout as
 // a single Telegram message (or a few chunks if it's very long). No live
@@ -30,16 +30,16 @@ type Result struct {
 
 // Options is everything Run needs to know.
 type Options struct {
-	// LaunchCommand is the base command, e.g. "gemini --yolo" or "agy".
+	// LaunchCommand is the base command, e.g. "agy" or "codex exec".
 	// Whitespace splits it into binary + base args.
 	LaunchCommand string
 
 	// PromptFlag is the flag the CLI uses to accept the message text,
-	// typically "--prompt".
+	// typically "--prompt". Use "--" for a positional prompt.
 	PromptFlag string
 
 	// ResumeArgs are appended to base args when Resume is true, e.g.
-	// ["--resume", "latest"] for Gemini CLI.
+	// ["--continue"] for AGY or ["resume", "--last"] for Codex.
 	ResumeArgs []string
 
 	// WorkingDir is the cwd the process runs in.
@@ -67,7 +67,7 @@ type Options struct {
 // lineWriter tees stdout to a buffer (for the final Result) and to an
 // OnProgress callback one complete line at a time.
 type lineWriter struct {
-	buf    *bytes.Buffer
+	buf     *bytes.Buffer
 	lineBuf bytes.Buffer
 	onLine  func(string)
 }
@@ -102,20 +102,10 @@ func Run(ctx context.Context, opts Options) Result {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 10 * time.Minute
 	}
-	if opts.PromptFlag == "" {
-		opts.PromptFlag = "--prompt"
+	binary, args, err := commandArgs(opts)
+	if err != nil {
+		return Result{Err: err}
 	}
-
-	parts := strings.Fields(opts.LaunchCommand)
-	if len(parts) == 0 {
-		return Result{Err: fmt.Errorf("rpc: empty launch_command")}
-	}
-	binary := parts[0]
-	args := append([]string(nil), parts[1:]...)
-	if opts.Resume {
-		args = append(args, opts.ResumeArgs...)
-	}
-	args = append(args, opts.PromptFlag, opts.Prompt)
 
 	cctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -137,7 +127,7 @@ func Run(ctx context.Context, opts Options) Result {
 	lw := &lineWriter{buf: &stdout, onLine: opts.OnProgress}
 	cmd.Stdout = lw
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	lw.flush()
 
 	return Result{
@@ -145,4 +135,24 @@ func Run(ctx context.Context, opts Options) Result {
 		Stderr: stderr.String(),
 		Err:    err,
 	}
+}
+
+// commandArgs builds the exact argv passed to the agent. It is separate from
+// Run so CLI-specific command shapes can be tested without launching them.
+func commandArgs(opts Options) (string, []string, error) {
+	parts := strings.Fields(opts.LaunchCommand)
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("rpc: empty launch_command")
+	}
+
+	args := append([]string(nil), parts[1:]...)
+	if opts.Resume {
+		args = append(args, opts.ResumeArgs...)
+	}
+	promptFlag := opts.PromptFlag
+	if promptFlag == "" {
+		promptFlag = "--prompt"
+	}
+	args = append(args, promptFlag, opts.Prompt)
+	return parts[0], args, nil
 }

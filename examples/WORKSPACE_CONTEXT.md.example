@@ -1,4 +1,7 @@
-# Workspace context
+# Workspace context template
+
+Copy this content into the instruction file recognized by your selected
+engine, such as `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code.
 
 Working directory: `/Users/YOUR_USERNAME/workspace`
 

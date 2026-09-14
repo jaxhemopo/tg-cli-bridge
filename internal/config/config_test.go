@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -110,6 +111,28 @@ hide_tool_calls = false
 	}
 }
 
+func TestLoad_ExplicitEmptyResumeArgsDisablesResume(t *testing.T) {
+	dir := t.TempDir()
+	p := writeConfig(t, dir, `
+[telegram]
+bot_token = "t"
+allowed_user_ids = [1]
+
+[session]
+launch_command = "one-shot-agent"
+
+[bridge]
+resume_args = []
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResumeArgs == nil || len(cfg.ResumeArgs) != 0 {
+		t.Fatalf("ResumeArgs = %#v, want explicit empty slice", cfg.ResumeArgs)
+	}
+}
+
 func TestLoad_MissingFile(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "nope.toml"))
 	if err == nil {
@@ -183,9 +206,115 @@ func TestWriteExample_RefusesOverwrite(t *testing.T) {
 	}
 }
 
+func TestExampleConfig_MatchesCheckedInTemplate(t *testing.T) {
+	checkedIn, err := os.ReadFile(filepath.Join("..", "..", "examples", "config.toml.example"))
+	if err != nil {
+		t.Fatalf("read checked-in example: %v", err)
+	}
+	if strings.TrimSpace(string(checkedIn)) != strings.TrimSpace(ExampleConfig) {
+		t.Fatal("ExampleConfig and examples/config.toml.example have drifted")
+	}
+}
+
 func TestDefaultPATH_HasHomebrew(t *testing.T) {
 	p := DefaultPATH()
 	if !strings.Contains(p, "/opt/homebrew/bin") {
 		t.Errorf("DefaultPATH missing homebrew: %s", p)
+	}
+}
+
+func TestKnownPresets(t *testing.T) {
+	tests := map[string]CLIPreset{
+		"agy": {
+			LaunchCmd:  "agy --dangerously-skip-permissions",
+			PromptFlag: "--print",
+			ResumeArgs: []string{"--continue"},
+		},
+		"claude": {
+			LaunchCmd:  "claude --dangerously-skip-permissions",
+			PromptFlag: "--print",
+			ResumeArgs: []string{"--continue"},
+		},
+		"codex": {
+			LaunchCmd:  "codex exec --sandbox workspace-write",
+			PromptFlag: "--",
+			ResumeArgs: []string{"resume", "--last"},
+		},
+	}
+	if len(KnownPresets) != len(tests) {
+		t.Fatalf("KnownPresets has %d entries, want %d", len(KnownPresets), len(tests))
+	}
+
+	for name, want := range tests {
+		got, ok := KnownPresets[name]
+		if !ok {
+			t.Errorf("missing %q preset", name)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("KnownPresets[%q] = %#v, want %#v", name, got, want)
+		}
+	}
+}
+
+func TestRenderAndLoad_CodexPreset(t *testing.T) {
+	preset := KnownPresets["codex"]
+	body := Render(RenderParams{
+		BotToken:   "test:token",
+		UserID:     42,
+		LaunchCmd:  preset.LaunchCmd,
+		WorkingDir: t.TempDir(),
+		PromptFlag: preset.PromptFlag,
+		ResumeArgs: preset.ResumeArgs,
+	})
+	if !strings.Contains(body, `prompt_flag = "--"`) {
+		t.Fatalf("rendered config missing positional prompt separator:\n%s", body)
+	}
+	if !strings.Contains(body, `resume_args = ["resume", "--last"]`) {
+		t.Fatalf("rendered config missing Codex resume args:\n%s", body)
+	}
+
+	path := writeConfig(t, t.TempDir(), body)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PromptFlag != "--" {
+		t.Errorf("PromptFlag = %q, want %q", cfg.PromptFlag, "--")
+	}
+	if !reflect.DeepEqual(cfg.ResumeArgs, []string{"resume", "--last"}) {
+		t.Errorf("ResumeArgs = %#v", cfg.ResumeArgs)
+	}
+}
+
+func TestUpdateCLI_SwitchesToCodexAndPreservesConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, Render(RenderParams{
+		BotToken:   "test:token",
+		UserID:     42,
+		LaunchCmd:  KnownPresets["agy"].LaunchCmd,
+		WorkingDir: dir,
+		PromptFlag: KnownPresets["agy"].PromptFlag,
+		ResumeArgs: KnownPresets["agy"].ResumeArgs,
+	}))
+
+	if err := UpdateCLI(path, KnownPresets["codex"]); err != nil {
+		t.Fatalf("UpdateCLI: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LaunchCommand != KnownPresets["codex"].LaunchCmd {
+		t.Errorf("LaunchCommand = %q", cfg.LaunchCommand)
+	}
+	if cfg.PromptFlag != "--" {
+		t.Errorf("PromptFlag = %q", cfg.PromptFlag)
+	}
+	if !reflect.DeepEqual(cfg.ResumeArgs, []string{"resume", "--last"}) {
+		t.Errorf("ResumeArgs = %#v", cfg.ResumeArgs)
+	}
+	if cfg.BotToken != "test:token" || cfg.WorkingDir != dir {
+		t.Error("UpdateCLI changed non-CLI settings")
 	}
 }

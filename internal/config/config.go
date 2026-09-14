@@ -28,12 +28,12 @@ type Config struct {
 	AllowedUserIDs map[int64]struct{}
 
 	// Session
-	TmuxSession    string
-	LaunchCommand  string
-	WorkingDir     string
-	PathEnv        string
-	TmuxWidth      int
-	TmuxHeight     int
+	TmuxSession   string
+	LaunchCommand string
+	WorkingDir    string
+	PathEnv       string
+	TmuxWidth     int
+	TmuxHeight    int
 
 	// Bridge tuning
 	PollInterval      float64
@@ -44,11 +44,11 @@ type Config struct {
 	CodeMaxLineChars  int  // truncate each line in code blocks to this many runes; 0 = unlimited
 	HideToolCalls     bool // when true, drop code-classified blocks entirely (tool calls, banners, thoughts) — keep only prose + menus
 
-	// RPC mode (default flow): each Telegram message spawns the agent CLI
-	// once with `--prompt "<text>"` and ships its stdout as a clean reply.
-	PromptFlag           string   // flag the CLI uses for the prompt, e.g. "--prompt"
-	ResumeArgs           []string // args appended for session resume, e.g. ["--resume","latest"]
-	TurnTimeoutSeconds   int      // max seconds to wait for one agent invocation
+	// RPC mode (default flow): each Telegram message spawns the agent CLI once
+	// with the configured prompt shape and ships stdout as a clean reply.
+	PromptFlag         string   // flag the CLI uses for the prompt, e.g. "--prompt"
+	ResumeArgs         []string // args appended for session resume, e.g. ["--resume","latest"]
+	TurnTimeoutSeconds int      // max seconds to wait for one agent invocation
 
 	// Source of this config — useful for status and logs.
 	SourcePath string
@@ -92,15 +92,27 @@ type rawConfig struct {
 // CLIPreset holds the CLI-specific settings for a known agent.
 type CLIPreset struct {
 	LaunchCmd  string
-	PromptFlag string   // empty = use default "--prompt"
+	PromptFlag string   // empty = use default "--prompt"; "--" terminates options for positional prompts
 	ResumeArgs []string // nil = use default ["--resume","latest"]
 }
 
 // KnownPresets maps the short names used by /switch to their CLI settings.
 var KnownPresets = map[string]CLIPreset{
-	"gemini": {LaunchCmd: "gemini --yolo"},
-	"agy":    {LaunchCmd: "agy --dangerously-skip-permissions", PromptFlag: "--print", ResumeArgs: []string{"--continue"}},
-	"claude": {LaunchCmd: "claude --dangerously-skip-permissions", PromptFlag: "--print", ResumeArgs: []string{"--continue"}},
+	"agy": {
+		LaunchCmd:  "agy --dangerously-skip-permissions",
+		PromptFlag: "--print",
+		ResumeArgs: []string{"--continue"},
+	},
+	"claude": {
+		LaunchCmd:  "claude --dangerously-skip-permissions",
+		PromptFlag: "--print",
+		ResumeArgs: []string{"--continue"},
+	},
+	"codex": {
+		LaunchCmd:  "codex exec --sandbox workspace-write",
+		PromptFlag: "--",
+		ResumeArgs: []string{"resume", "--last"},
+	},
 }
 
 // UpdateCLI rewrites the CLI-specific fields in an existing config file while
@@ -113,12 +125,32 @@ func UpdateCLI(path string, p CLIPreset) error {
 	raw.Session.LaunchCommand = p.LaunchCmd
 	raw.Bridge.PromptFlag = p.PromptFlag
 	raw.Bridge.ResumeArgs = p.ResumeArgs
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(path), ".tg-cli-bridge-config-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(raw)
+	tmpPath := f.Name()
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := toml.NewEncoder(f).Encode(raw); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // DefaultPath returns the default config file location.
@@ -201,7 +233,7 @@ func Load(path string) (*Config, error) {
 		HideToolCalls:     raw.Bridge.HideToolCalls == nil || *raw.Bridge.HideToolCalls,
 		PromptFlag:        defaultStr(raw.Bridge.PromptFlag, "--prompt"),
 		ResumeArgs: func() []string {
-			if len(raw.Bridge.ResumeArgs) > 0 {
+			if raw.Bridge.ResumeArgs != nil {
 				return raw.Bridge.ResumeArgs
 			}
 			return []string{"--resume", "latest"}
@@ -241,7 +273,7 @@ func Render(p RenderParams) string {
 	if p.PromptFlag != "" && p.PromptFlag != "--prompt" {
 		extra += fmt.Sprintf("prompt_flag = %q\n", p.PromptFlag)
 	}
-	if len(p.ResumeArgs) > 0 {
+	if p.ResumeArgs != nil {
 		quoted := make([]string, len(p.ResumeArgs))
 		for i, a := range p.ResumeArgs {
 			quoted[i] = fmt.Sprintf("%q", a)
@@ -287,46 +319,56 @@ func defaultInt(v, def int) int {
 // ExampleConfig is an annotated template printed by `tg-cli-bridge example`.
 // Keep in sync with examples/config.toml.example.
 const ExampleConfig = `
-# tg-cli-bridge configuration.
-# Treat this file as a secret — it contains your bot token.
+# tg-cli-bridge example configuration.
+# Copy to ~/.config/tg-cli-bridge/config.toml and fill in your values.
+# Treat the real file as a secret — it contains your bot token.
 
 [telegram]
-# Token from @BotFather. Send /newbot to create one.
+# Token from @BotFather. /newbot to create one.
 bot_token = "PUT_YOUR_BOT_TOKEN_HERE"
 
-# Your numeric Telegram user ID. Message @userinfobot to find it.
+# Your numeric Telegram user ID. Message @userinfobot on Telegram to find it.
+# Only these IDs can send messages to your bot.
 allowed_user_ids = [123456789]
 
 
 [session]
-# Command that launches your agent CLI in headless mode.
-#   "gemini --yolo"                        — Gemini CLI, auto-approve tools
-#   "agy --dangerously-skip-permissions"   — AGY / Antigravity
-#   "claude"                               — Claude Code
-#   "bash"                                 — plain shell (testing)
-launch_command = "gemini --yolo"
+# Command to launch your agent CLI. Examples:
+#   "agy --dangerously-skip-permissions"     — AGY / Antigravity
+#   "claude --dangerously-skip-permissions"  — Claude Code
+#   "codex exec --sandbox workspace-write"   — Codex CLI
+#   "bash"                                   — plain shell (useful for testing)
+launch_command = "agy --dangerously-skip-permissions"
 
-# Working directory for every agent invocation. Put a GEMINI.md (or
-# equivalent) here to give the agent context about available tools.
+# Directory the agent launches in. Use a full path, ~ is not expanded.
+# Put the instruction file recognized by your engine here (for example,
+# AGENTS.md for Codex or CLAUDE.md for Claude Code).
 working_dir = "/Users/YOUR_USERNAME/workspace"
 
-# Optional: override PATH for the agent process.
+# Optional: override the PATH the agent process inherits.
 # Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 
 [bridge]
-# Telegram's hard limit is 4096; leave some headroom for formatting.
+# Maximum characters per Telegram message. Telegram's hard limit is 4096.
 max_message_chars = 3800
 
-# Flag used to pass the prompt to the CLI. Default: --prompt.
-# AGY uses --print.
-# prompt_flag = "--print"
+# Flag the CLI uses for a headless/non-interactive prompt.
+# AGY and Claude use --print. Codex accepts a positional prompt, so use --
+# to end option parsing before the Telegram message.
+prompt_flag = "--print"
+# prompt_flag = "--"  # Codex
 
-# Args appended when resuming a previous session. Default: ["--resume", "latest"].
-# AGY uses ["--continue"].
-# resume_args = ["--continue"]
+# Args inserted after launch_command to resume the CLI's latest session.
+resume_args = ["--continue"]
+# resume_args = ["resume", "--last"]  # Codex
+# resume_args = []                      # no session continuation
 
-# Kill the CLI after this many seconds if it hasn't exited. Default: 600.
+# The bridge does not store conversation IDs. Latest-session selection is not
+# isolated per Telegram chat; use one engine and chat per working directory.
+
+# How long to wait for one agent invocation before killing it (seconds).
+# Default is 600 (10 minutes). Increase for very long-running tasks.
 # turn_timeout_seconds = 600
 `
