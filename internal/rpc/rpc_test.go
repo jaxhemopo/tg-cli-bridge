@@ -125,6 +125,25 @@ func TestRun_RejectsEmptyLaunchCommand(t *testing.T) {
 	}
 }
 
+func TestRun_PassesConfiguredEnvironment(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "env-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nprintf '%s' \"$TG_CLI_TEST_VALUE\"\n"), 0o700); err != nil {
+		t.Fatalf("write env agent: %v", err)
+	}
+	res := Run(context.Background(), Options{
+		LaunchCommand: agent,
+		Prompt:        "ignored",
+		Timeout:       5 * time.Second,
+		Env:           map[string]string{"TG_CLI_TEST_VALUE": "passed"},
+	})
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if res.Stdout != "passed" {
+		t.Fatalf("Stdout = %q", res.Stdout)
+	}
+}
+
 func TestRun_HonoursTimeout(t *testing.T) {
 	// A tiny stand-in agent ignores its argv and runs longer than our timeout.
 	agent := filepath.Join(t.TempDir(), "slow-agent")
@@ -140,6 +159,9 @@ func TestRun_HonoursTimeout(t *testing.T) {
 	elapsed := time.Since(start)
 	if res.Err == nil {
 		t.Fatal("expected timeout error")
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut = false, want true")
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Run blocked %v; should have aborted near 200ms", elapsed)

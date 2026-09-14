@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -24,6 +25,8 @@ import (
 type Result struct {
 	Stdout string
 	Stderr string
+	// TimedOut distinguishes a deadline from an explicit /cancel.
+	TimedOut bool
 	// Err is the process error if any (non-zero exit, timeout, …).
 	Err error
 }
@@ -62,6 +65,9 @@ type Options struct {
 	// OnProgress, if set, is called with each complete line of stdout as it
 	// arrives. Lines are raw bytes (may contain ANSI); callers strip as needed.
 	OnProgress func(line string)
+
+	// Env contains additional environment variables for the agent process.
+	Env map[string]string
 }
 
 // lineWriter tees stdout to a buffer (for the final Result) and to an
@@ -99,15 +105,16 @@ func (w *lineWriter) flush() {
 // Run invokes the agent CLI once with the given prompt and returns its
 // stdout. ctx cancellation aborts the process.
 func Run(ctx context.Context, opts Options) Result {
-	if opts.Timeout <= 0 {
-		opts.Timeout = 10 * time.Minute
-	}
 	binary, args, err := commandArgs(opts)
 	if err != nil {
 		return Result{Err: err}
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	cctx := ctx
+	cancel := func() {}
+	if opts.Timeout > 0 {
+		cctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, binary, args...)
@@ -122,6 +129,26 @@ func Run(ctx context.Context, opts Options) Result {
 			"BASH_SILENCE_DEPRECATION_WARNING=1",
 		)
 	}
+	env := cmd.Environ()
+	for key, value := range opts.Env {
+		env = append(env, key+"="+value)
+	}
+	cmd.Env = env
+
+	// Agent CLIs can spawn shells and other grandchildren. Put the invocation
+	// in its own process group so /cancel and deadlines do not leave those
+	// descendants alive or holding stdout open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
 
 	var stdout, stderr bytes.Buffer
 	lw := &lineWriter{buf: &stdout, onLine: opts.OnProgress}
@@ -131,9 +158,10 @@ func Run(ctx context.Context, opts Options) Result {
 	lw.flush()
 
 	return Result{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
-		Err:    err,
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		TimedOut: cctx.Err() == context.DeadlineExceeded,
+		Err:      err,
 	}
 }
 

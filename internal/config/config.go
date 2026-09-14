@@ -6,16 +6,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
-// TurnTimeout returns TurnTimeoutSeconds as a time.Duration. Convenience
-// wrapper so callers don't repeat the conversion math.
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// TurnTimeoutLabel returns a compact timeout for status messages and logs.
+func (c *Config) TurnTimeoutLabel() string {
+	d := c.TurnTimeout()
+	if d == 0 {
+		return "unlimited"
+	}
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return d.String()
+}
+
+// TurnTimeout returns TurnTimeoutSeconds as a duration. A negative value
+// disables the deadline; zero uses the ten-minute default.
 func (c *Config) TurnTimeout() time.Duration {
-	if c.TurnTimeoutSeconds <= 0 {
+	if c.TurnTimeoutSeconds < 0 {
+		return 0
+	}
+	if c.TurnTimeoutSeconds == 0 {
 		return 10 * time.Minute
 	}
 	return time.Duration(c.TurnTimeoutSeconds) * time.Second
@@ -34,6 +55,7 @@ type Config struct {
 	PathEnv       string
 	TmuxWidth     int
 	TmuxHeight    int
+	Env           map[string]string
 
 	// Bridge tuning
 	PollInterval      float64
@@ -62,12 +84,13 @@ type rawConfig struct {
 	} `toml:"telegram"`
 
 	Session struct {
-		TmuxSession   string `toml:"tmux_session"`
-		LaunchCommand string `toml:"launch_command"`
-		WorkingDir    string `toml:"working_dir"`
-		Path          string `toml:"path"`
-		Width         int    `toml:"width"`
-		Height        int    `toml:"height"`
+		TmuxSession   string            `toml:"tmux_session"`
+		LaunchCommand string            `toml:"launch_command"`
+		WorkingDir    string            `toml:"working_dir"`
+		Path          string            `toml:"path"`
+		Width         int               `toml:"width"`
+		Height        int               `toml:"height"`
+		Env           map[string]string `toml:"env"`
 	} `toml:"session"`
 
 	Bridge struct {
@@ -112,6 +135,11 @@ var KnownPresets = map[string]CLIPreset{
 		LaunchCmd:  "codex exec --sandbox workspace-write",
 		PromptFlag: "--",
 		ResumeArgs: []string{"resume", "--last"},
+	},
+	"glm": {
+		LaunchCmd:  "claude-glm --dangerously-skip-permissions",
+		PromptFlag: "--print",
+		ResumeArgs: []string{"--continue"},
 	},
 }
 
@@ -207,6 +235,11 @@ func Load(path string) (*Config, error) {
 	if raw.Session.LaunchCommand == "" {
 		return nil, fmt.Errorf("%s: missing [session].launch_command", path)
 	}
+	for key := range raw.Session.Env {
+		if !envNameRE.MatchString(key) {
+			return nil, fmt.Errorf("%s: invalid [session.env] name %q", path, key)
+		}
+	}
 
 	allowed := make(map[int64]struct{}, len(raw.Telegram.AllowedUserIDs))
 	for _, id := range raw.Telegram.AllowedUserIDs {
@@ -224,6 +257,7 @@ func Load(path string) (*Config, error) {
 		PathEnv:           defaultStr(raw.Session.Path, DefaultPATH()),
 		TmuxWidth:         defaultInt(raw.Session.Width, 80),
 		TmuxHeight:        defaultInt(raw.Session.Height, 24),
+		Env:               raw.Session.Env,
 		PollInterval:      defaultFloat(raw.Bridge.PollIntervalSeconds, 0.6),
 		QuiescenceSeconds: defaultFloat(raw.Bridge.QuiescenceSeconds, 1.2),
 		MinCharsToFlush:   defaultInt(raw.Bridge.MinCharsToFlush, 8),
@@ -337,6 +371,7 @@ allowed_user_ids = [123456789]
 #   "agy --dangerously-skip-permissions"     — AGY / Antigravity
 #   "claude --dangerously-skip-permissions"  — Claude Code
 #   "codex exec --sandbox workspace-write"   — Codex CLI
+#   "claude-glm --dangerously-skip-permissions" — local GLM wrapper on PATH
 #   "bash"                                   — plain shell (useful for testing)
 launch_command = "agy --dangerously-skip-permissions"
 
@@ -348,6 +383,11 @@ working_dir = "/Users/YOUR_USERNAME/workspace"
 # Optional: override the PATH the agent process inherits.
 # Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Optional environment variables passed to the agent process. Prefer a
+# private config file and never commit real keys.
+# [session.env]
+# EXAMPLE_API_KEY = "replace-me"
 
 
 [bridge]

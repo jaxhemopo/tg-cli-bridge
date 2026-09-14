@@ -86,6 +86,50 @@ height = 20
 	}
 }
 
+func TestLoad_EnvironmentAndUnlimitedTimeout(t *testing.T) {
+	dir := t.TempDir()
+	p := writeConfig(t, dir, `
+[telegram]
+bot_token = "test:token"
+allowed_user_ids = [42]
+
+[session]
+launch_command = "claude-glm"
+
+[session.env]
+API_BASE = "https://example.test"
+
+[bridge]
+turn_timeout_seconds = -1
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Env["API_BASE"] != "https://example.test" {
+		t.Fatalf("Env = %#v", cfg.Env)
+	}
+	if cfg.TurnTimeout() != 0 || cfg.TurnTimeoutLabel() != "unlimited" {
+		t.Fatalf("timeout = %v (%s)", cfg.TurnTimeout(), cfg.TurnTimeoutLabel())
+	}
+}
+
+func TestLoad_RejectsInvalidEnvironmentName(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), `
+[telegram]
+bot_token = "test:token"
+allowed_user_ids = [42]
+[session]
+launch_command = "bash"
+[session.env]
+"BAD;NAME" = "value"
+`)
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "invalid [session.env] name") {
+		t.Fatalf("expected invalid env-name error, got %v", err)
+	}
+}
+
 func TestLoad_HideToolCallsExplicitFalse(t *testing.T) {
 	dir := t.TempDir()
 	p := writeConfig(t, dir, `
@@ -240,6 +284,11 @@ func TestKnownPresets(t *testing.T) {
 			PromptFlag: "--",
 			ResumeArgs: []string{"resume", "--last"},
 		},
+		"glm": {
+			LaunchCmd:  "claude-glm --dangerously-skip-permissions",
+			PromptFlag: "--print",
+			ResumeArgs: []string{"--continue"},
+		},
 	}
 	if len(KnownPresets) != len(tests) {
 		t.Fatalf("KnownPresets has %d entries, want %d", len(KnownPresets), len(tests))
@@ -254,6 +303,29 @@ func TestKnownPresets(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("KnownPresets[%q] = %#v, want %#v", name, got, want)
 		}
+	}
+}
+
+func TestUpdateCLI_PreservesUnlimitedTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, Render(RenderParams{
+		BotToken:   "test:token",
+		UserID:     42,
+		LaunchCmd:  KnownPresets["glm"].LaunchCmd,
+		WorkingDir: dir,
+		PromptFlag: KnownPresets["glm"].PromptFlag,
+		ResumeArgs: KnownPresets["glm"].ResumeArgs,
+	})+"\nturn_timeout_seconds = -1\n")
+
+	if err := UpdateCLI(path, KnownPresets["agy"]); err != nil {
+		t.Fatalf("UpdateCLI: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TurnTimeout() != 0 {
+		t.Fatalf("TurnTimeout = %v, want unlimited", cfg.TurnTimeout())
 	}
 }
 

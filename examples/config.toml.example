@@ -16,6 +16,7 @@ allowed_user_ids = [123456789]
 #   "agy --dangerously-skip-permissions"     — AGY / Antigravity
 #   "claude --dangerously-skip-permissions"  — Claude Code
 #   "codex exec --sandbox workspace-write"   — Codex CLI
+#   "claude-glm --dangerously-skip-permissions" — local GLM wrapper on PATH
 #   "bash"                                   — plain shell (useful for testing)
 launch_command = "agy --dangerously-skip-permissions"
 
@@ -27,6 +28,11 @@ working_dir = "/Users/YOUR_USERNAME/workspace"
 # Optional: override the PATH the agent process inherits.
 # Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Optional environment variables passed to the agent process. Prefer a
+# private config file and never commit real keys.
+# [session.env]
+# EXAMPLE_API_KEY = "replace-me"
 
 
 [bridge]

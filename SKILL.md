@@ -1,6 +1,6 @@
 ---
 name: tg-cli-bridge
-description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive AGY/Antigravity, Claude Code, Codex, or another headless agent CLI from your phone. Each message spawns the CLI with your prompt, waits for it to finish, and replies with clean output. Supports latest-session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
+description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive AGY/Antigravity, Claude Code, Codex, a Claude-compatible GLM wrapper, or another headless agent CLI from your phone. Each message spawns the CLI with your prompt, waits for it to finish, and replies with clean output. Supports latest-session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
 ---
 
 # tg-cli-bridge — installation skill
@@ -79,6 +79,7 @@ The `init` wizard handles this, but for reference:
 | AGY | `agy --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 | Claude Code | `claude --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 | Codex CLI | `codex exec --sandbox workspace-write` | `--` | `["resume","--last"]` |
+| Claude + GLM wrapper | `claude-glm --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 
 **AGY note:** AGY reprints the full conversation history in `--continue` mode.
 The bridge handles this automatically by diffing each turn's output against
@@ -88,6 +89,8 @@ For a custom CLI, put fixed engine/model arguments in `launch_command`, use
 the one-shot flag as `prompt_flag` (`--` for a positional prompt), and put the
 latest-session arguments in `resume_args`. The command is split into arguments,
 not evaluated by a shell, so do not use pipes, redirects, or shell assignments.
+Use `[session.env]` for required environment variables. A negative
+`turn_timeout_seconds` disables the deadline and should be used deliberately.
 
 ## Things to watch for
 
@@ -107,6 +110,10 @@ not evaluated by a shell, so do not use pipes, redirects, or shell assignments.
 - **The macOS installer manages one LaunchAgent.** Run one background bridge
   at a time. Concurrent bots require separate tokens, configs, working
   directories, and manually managed service identities.
+- **File auto-send starts off.** Enable it per chat with `/files on` only when
+  the agent is expected to create files that should be returned to Telegram.
+- **`/switch` and `/model` have buttons.** Typed forms such as `/switch codex`
+  still work; `/model` applies only to Claude-compatible launch commands.
 
 ## Troubleshooting flow
 

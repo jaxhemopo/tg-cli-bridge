@@ -1,8 +1,8 @@
 # tg-cli-bridge
 
-Control AGY, Claude Code, Codex, or another headless agent CLI from your phone
-via Telegram. Send a message and get a clean reply back without opening your
-laptop.
+Control AGY, Claude Code, Codex, a Claude-compatible GLM wrapper, or another
+headless agent CLI from your phone via Telegram. Send a message and get a clean
+reply back without opening your laptop.
 
 A single static Go binary. No Python, no venv, no Docker.
 
@@ -20,7 +20,7 @@ Phone (Telegram) ──HTTPS──► Telegram Bot API ──long-poll──► 
 
 ## ⚠️ Security — read this first
 
-The AGY and Claude presets run with **all tool approvals disabled** via
+The AGY, Claude, and GLM presets run with **all tool approvals disabled** via
 `--dangerously-skip-permissions`. The Codex preset uses its `workspace-write`
 sandbox. These agents can run commands and change files without a confirmation
 round-trip through Telegram.
@@ -113,6 +113,7 @@ The `init` wizard knows the right flags for each CLI out of the box.
 | **AGY / Antigravity** | `agy --dangerously-skip-permissions` | `--print` | `--continue` |
 | Claude Code | `claude --dangerously-skip-permissions` | `--print` | `--continue` |
 | Codex CLI | `codex exec --sandbox workspace-write` | positional (`--`) | `resume --last` |
+| Claude + GLM wrapper | `claude-glm --dangerously-skip-permissions` | `--print` | `--continue` |
 | Other / custom | Your headless command | CLI-specific | CLI-specific |
 
 Codex normally requires `working_dir` to be a Git repository. Add
@@ -130,7 +131,10 @@ You can switch live without touching the terminal:
 /switch agy
 /switch claude
 /switch codex
+/switch glm
 ```
+
+Sending `/switch` without a name opens the same choices as Telegram buttons.
 
 The bridge updates `config.toml`. When managed by the bundled LaunchAgent it
 restarts automatically and comes back on the new CLI within a few seconds; in
@@ -145,9 +149,11 @@ Send any plain text and it's forwarded to the agent as a prompt.
 |---------|-------------|
 | `/new` | Make the next message start without resume arguments |
 | `/cancel` | Cancel the command currently running in this chat |
+| `/kill` | Force-stop a stuck command and its child processes |
 | `/retry` | Re-run the last message from this chat |
-| `/files on\|off` | Toggle automatic sending of newly created files |
-| `/switch <name>` | Switch CLI globally — `agy`, `claude`, or `codex` |
+| `/files on\|off` | Toggle automatic sending of newly created files; off by default |
+| `/switch [name]` | Open the switch menu or select `agy`, `claude`, `codex`, or `glm` |
+| `/model` or `/m` | Choose the configured Claude/GLM model tier |
 | `/status` | Show the current CLI and this chat's bridge state |
 | `/yes` | Shorthand for sending "1" to a numbered menu |
 | `/help` | List all commands |
@@ -166,11 +172,16 @@ allowed_user_ids = [123456789]        # your Telegram user ID (@userinfobot)
 launch_command = "agy --dangerously-skip-permissions"
 working_dir    = "/Users/you/workspace"
 
+# Optional values passed directly to the child process.
+[session.env]
+# EXAMPLE_API_KEY = "replace-me"
+
 [bridge]
 max_message_chars   = 3800
 prompt_flag         = "--print"
 resume_args         = ["--continue"]
 # turn_timeout_seconds = 600          # kill the CLI after this long (default 10m)
+# turn_timeout_seconds = -1           # disable the deadline deliberately
 ```
 
 **The config contains your bot token — treat it like a password. Never commit it.**
@@ -212,7 +223,7 @@ will start a separate CLI session.
 
 `launch_command` is split into arguments; it is not run through a shell. Avoid
 pipes, redirects, environment assignments, and quoted arguments containing
-spaces.
+spaces. Put required environment variables under `[session.env]` instead.
 
 ## Context files
 

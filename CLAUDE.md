@@ -1,7 +1,7 @@
 # tg-cli-bridge
 
 Go binary that bridges a Telegram bot to an agentic CLI (AGY/Antigravity,
-Claude Code, Codex, or a custom headless command).
+Claude Code, Codex, a Claude-compatible GLM wrapper, or a custom command).
 
 ## Build
 
@@ -60,7 +60,8 @@ not run multiple chats or CLI processes against the same working directory.
 - **Status bubble** — single ⏳ message edits in-place as agent stdout reveals what it's doing (email, drive, shell, etc.). Deleted before the real reply lands so the chat stays clean.
 - **`DiffSince`** — some CLIs (AGY `--continue`) reprint the entire conversation history on every invocation. `DiffSince(prev, curr)` extracts only the new content.
 - **`KnownPresets`** in `config.go` — maps short names (`agy`, `claude`,
-  `codex`) to the right flags. Powers both the `init` wizard and `/switch`.
+  `codex`, `glm`) to the right flags. Powers both the `init` wizard and
+  `/switch` buttons.
 - **Positional prompts** — set `prompt_flag` to `--`; the separator ends
   option parsing before the prompt. Codex uses this command shape.
 
@@ -70,9 +71,11 @@ not run multiple chats or CLI processes against the same working directory.
 |---------|--------|
 | `/new` | Make the next message omit resume arguments |
 | `/cancel` | Cancel the command currently running in this chat |
+| `/kill` | Force-stop the command and its child processes |
 | `/retry` | Re-run this chat's last message |
-| `/files on\|off` | Toggle sending newly created files |
-| `/switch <name>` | Switch CLI globally. A LaunchAgent run restarts automatically; foreground mode needs a manual restart. |
+| `/files on\|off` | Toggle sending newly created files; off by default |
+| `/switch [name]` | Open buttons or switch CLI globally. A LaunchAgent run restarts automatically; foreground mode needs a manual restart. |
+| `/model`, `/m` | Select the configured Claude/GLM model tier |
 | `/status` | Show current launch command and this chat's bridge state |
 | `/yes` | Send "1" to a numbered menu |
 | `/help` | List commands |
@@ -84,6 +87,8 @@ not run multiple chats or CLI processes against the same working directory.
 3. Verify the CLI supports a headless prompt, set `prompt_flag` (`--` for a
    positional prompt) and `resume_args`, then test new and resumed turns with
    `tg-cli-bridge run`.
+4. Put required process environment variables under `[session.env]`; set
+   `turn_timeout_seconds = -1` only when the engine must run without a deadline.
 
 ## Context files
 
