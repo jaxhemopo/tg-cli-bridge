@@ -36,6 +36,23 @@ your-cli --prompt "hello"   # or --print, -p, etc.
 ```
 Then set `prompt_flag` in `[bridge]` to match.
 
+For a CLI such as Codex that accepts the prompt as a positional argument, use
+`prompt_flag = "--"`. The separator ends option parsing before the Telegram
+text.
+
+## Agent resumes the wrong conversation
+
+**Cause:** The bridge does not yet store conversation IDs. AGY `--continue`,
+Claude `--continue`, and Codex `exec resume --last` select the engine's newest
+saved session rather than a session belonging to a particular Telegram chat.
+Another Telegram chat, bridge process, or manual CLI run can therefore become
+"latest."
+
+**Fix:** Stop duplicate bridge or CLI processes, send `/new`, and keep one
+active Telegram chat and engine per `working_dir`. Do not run two engines
+against the same files at the same time. If you use `/switch`, wait for the
+current turn to finish and send `/new` after the bridge restarts.
+
 ## Agent replies but output is the whole conversation history
 
 **Cause:** Your CLI's resume flag reprints full history on every invocation

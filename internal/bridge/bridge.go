@@ -22,7 +22,8 @@ import (
 	"github.com/jaxhemopo/tg-cli-bridge/internal/rpc"
 )
 
-// Bridge owns the bot and per-chat session state.
+// Bridge owns the bot and per-chat runtime bookkeeping. The CLI's actual
+// conversation IDs are not tracked; see the session-isolation notes in README.
 type Bridge struct {
 	cfg *config.Config
 	bot *tgbotapi.BotAPI
@@ -47,9 +48,15 @@ type Bridge struct {
 	running map[int64]bool
 	// Per-chat last user prompt, for /retry.
 	lastPrompt map[int64]string
-	// Per-chat chats that have disabled auto-sending agent-created files.
-	filesDisabled map[int64]bool
+	// Per-chat chats that have enabled auto-sending agent-created files.
+	// Default is off so a new bot cannot unexpectedly upload workspace files.
+	filesEnabled map[int64]bool
+	// Per-chat Claude model selection. The choice is intentionally runtime
+	// state only; /new resets it to the default.
+	modelChoice map[int64]string
 }
+
+const defaultModelChoice = "sonnet"
 
 // activeMenu tracks a numbered menu currently shown as an inline keyboard.
 type activeMenu struct {
@@ -68,16 +75,14 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	log.Printf("Authorized as bot @%s", bot.Self.UserName)
 
 	// Register slash-command hints so the / popup works in Telegram.
-	names := make([]string, 0, len(config.KnownPresets))
-	for k := range config.KnownPresets {
-		names = append(names, k)
-	}
-	sort.Strings(names)
 	cmds := []tgbotapi.BotCommand{
 		{Command: "new", Description: "Start a fresh session"},
 		{Command: "cancel", Description: "Cancel the running command"},
+		{Command: "kill", Description: "Force-stop a stuck command"},
 		{Command: "retry", Description: "Re-run your last message"},
-		{Command: "switch", Description: "Switch CLI: /switch " + strings.Join(names, " or /switch ")},
+		{Command: "switch", Description: "Switch CLI (tap to pick)"},
+		{Command: "model", Description: "Select a Claude model"},
+		{Command: "m", Description: "Select a Claude model (shortcut)"},
 		{Command: "files", Description: "Toggle auto-sending agent-created files (/files on|off)"},
 		{Command: "status", Description: "Show bridge state"},
 		{Command: "yes", Description: "Pick option 1 from a numbered menu"},
@@ -96,9 +101,10 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		runningCancels: make(map[int64]context.CancelFunc),
 		running:        make(map[int64]bool),
 		lastPrompt:     make(map[int64]string),
-		filesDisabled:  make(map[int64]bool),
+		filesEnabled:   make(map[int64]bool),
+		modelChoice:    make(map[int64]string),
 	}
-	log.Printf("Bridge online (RPC mode). launch_command=%q", cfg.LaunchCommand)
+	log.Printf("Bridge online (RPC mode). launch_command=%q turn_timeout=%s", cfg.LaunchCommand, cfg.TurnTimeoutLabel())
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
@@ -161,7 +167,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	var attachmentPath string
 	var attachErr error
-	if msg.Photo != nil || msg.Document != nil {
+	if len(msg.Photo) > 0 || msg.Document != nil {
 		attachmentPath, attachErr = b.handleIncomingFile(msg)
 		if attachErr != nil {
 			log.Printf("failed to handle incoming file: %v", attachErr)
@@ -171,7 +177,7 @@ func (b *Bridge) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 
 	if text == "" && attachmentPath != "" {
-		if msg.Photo != nil {
+		if len(msg.Photo) > 0 {
 			text = "Describe and analyze this image."
 		} else {
 			text = "Analyze this file."
@@ -204,7 +210,7 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 	}
 	b.running[chat] = true
 	b.lastPrompt[chat] = prompt
-	filesOn := !b.filesDisabled[chat]
+	filesOn := b.filesEnabled[chat]
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
@@ -326,13 +332,16 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		preFiles = b.scanWorkspace()
 	}
 
+	launchCmd := b.launchCommandForChat(chat)
+	log.Printf("Executing agent CLI: %s %s %q", launchCmd, b.cfg.PromptFlag, truncate(prompt, 60))
 	res := rpc.Run(turnCtx, rpc.Options{
-		LaunchCommand: b.cfg.LaunchCommand,
+		LaunchCommand: launchCmd,
 		PromptFlag:    b.cfg.PromptFlag,
 		ResumeArgs:    b.cfg.ResumeArgs,
 		Resume:        resume,
 		WorkingDir:    b.cfg.WorkingDir,
 		PathEnv:       b.cfg.PathEnv,
+		Env:           b.cfg.Env,
 		Timeout:       b.cfg.TurnTimeout(),
 		Prompt:        prompt,
 		OnProgress: func(rawLine string) {
@@ -350,6 +359,7 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 			}
 		},
 	})
+	log.Printf("Agent CLI finished. stdout=%d bytes stderr=%d bytes err=%v", len(res.Stdout), len(res.Stderr), res.Err)
 
 	close(typingDone)
 	close(statusDone)
@@ -371,8 +381,8 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 		var errMsg string
 		if turnCtx.Err() == context.Canceled {
 			errMsg = "🛑 Command cancelled."
-		} else if turnCtx.Err() == context.DeadlineExceeded {
-			errMsg = "⚠️ Agent timed out after 10 minutes."
+		} else if res.TimedOut {
+			errMsg = fmt.Sprintf("⚠️ Agent timed out after %s. Send /retry to run it again.", b.cfg.TurnTimeoutLabel())
 		} else {
 			errMsg = fmt.Sprintf("⚠️ agent failed: %v", res.Err)
 			if res.Stderr != "" {
@@ -404,8 +414,8 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 	if res.Err != nil {
 		if turnCtx.Err() == context.Canceled {
 			body += "\n\n🛑 <b>Agent run cancelled by user.</b>"
-		} else if turnCtx.Err() == context.DeadlineExceeded {
-			body += "\n\n⚠️ <b>Agent timed out after 10 minutes.</b>"
+		} else if res.TimedOut {
+			body += fmt.Sprintf("\n\n⚠️ <b>Agent timed out after %s.</b> Send /retry to continue.", b.cfg.TurnTimeoutLabel())
 		} else {
 			body += fmt.Sprintf("\n\n⚠️ <b>Agent failed: %s</b>", res.Err.Error())
 		}
@@ -426,12 +436,16 @@ func (b *Bridge) runTurn(ctx context.Context, chat int64, prompt string) {
 	menu := output.DetectMenu(body)
 	switch {
 	case body == "":
+		log.Println("Sending empty body reply")
 		b.reply(ctx, chat, "(no output)")
 	case menu != nil:
+		log.Println("Sending menu reply")
 		b.sendMenuReply(ctx, chat, body, menu)
 	case res.Err == nil && utf8.RuneCountInString(newRaw) > b.longReplyThreshold():
+		log.Println("Sending long reply file")
 		b.sendLongReplyFile(ctx, chat, newRaw)
 	default:
+		log.Println("Sending standard body reply")
 		b.sendBody(ctx, chat, body)
 	}
 
@@ -459,7 +473,7 @@ func (b *Bridge) sendLongReplyFile(ctx context.Context, chat int64, raw string) 
 		b.sendBody(ctx, chat, b.formatReply(raw))
 		return
 	}
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	doc := tgbotapi.NewDocument(chat, tgbotapi.FilePath(path))
 	doc.Caption = "📄 Long reply attached as a file.\n\n" + truncate(raw, 300)
@@ -639,7 +653,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 	case "start", "help":
 		names := make([]string, 0, len(config.KnownPresets))
 		for k := range config.KnownPresets {
-			names = append(names, "/switch "+k)
+			names = append(names, k)
 		}
 		sort.Strings(names)
 		b.reply(ctx, chat,
@@ -649,26 +663,33 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 				"Commands:\n"+
 				"/new — start a fresh session\n"+
 				"/cancel — cancel the running command\n"+
+				"/kill — force-stop a stuck command\n"+
 				"/retry — re-run your last message\n"+
+				"/switch — tap to choose "+strings.Join(names, ", ")+"\n"+
+				"/model or /m — choose a Claude model\n"+
 				"/files on|off — toggle auto-sending files the agent creates\n"+
 				"/yes — pick option 1 from a numbered menu\n"+
-				"/status — show bridge state\n"+
-				strings.Join(names, ", ")+" — switch CLI")
+				"/status — show bridge state")
 	case "new":
 		b.mu.Lock()
 		delete(b.sessions, chat)
 		delete(b.lastOutput, chat)
 		delete(b.activeMenus, chat)
 		delete(b.lastPrompt, chat)
+		delete(b.modelChoice, chat)
 		b.mu.Unlock()
-		b.reply(ctx, chat, "🆕 Session reset. Your next message starts fresh (no --resume).")
-	case "cancel":
+		b.reply(ctx, chat, "🆕 Session reset. Your next message starts fresh; the model is back to Sonnet where supported.")
+	case "cancel", "kill":
 		b.mu.Lock()
 		cancel, running := b.runningCancels[chat]
 		b.mu.Unlock()
 		if running && cancel != nil {
 			cancel()
-			b.reply(ctx, chat, "🛑 Command cancellation requested.")
+			if msg.Command() == "kill" {
+				b.reply(ctx, chat, "🔪 Force-stopping the command; the chat should unlock within a few seconds.")
+			} else {
+				b.reply(ctx, chat, "🛑 Command cancellation requested.")
+			}
 		} else {
 			b.reply(ctx, chat, "ℹ️ No command is currently running.")
 		}
@@ -686,15 +707,15 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.mu.Lock()
 		switch arg {
 		case "on":
-			delete(b.filesDisabled, chat)
+			b.filesEnabled[chat] = true
 		case "off":
-			b.filesDisabled[chat] = true
+			delete(b.filesEnabled, chat)
 		case "":
-			disabled := b.filesDisabled[chat]
+			enabled := b.filesEnabled[chat]
 			b.mu.Unlock()
-			state := "on"
-			if disabled {
-				state = "off"
+			state := "off"
+			if enabled {
+				state = "on"
 			}
 			b.reply(ctx, chat, fmt.Sprintf("📎 File auto-send is %s. Use /files on or /files off.", state))
 			return
@@ -703,7 +724,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 			b.reply(ctx, chat, "Usage: /files on  or  /files off")
 			return
 		}
-		on := !b.filesDisabled[chat]
+		on := b.filesEnabled[chat]
 		b.mu.Unlock()
 		if on {
 			b.reply(ctx, chat, "📎 File auto-send enabled — I'll send back files the agent newly creates.")
@@ -714,7 +735,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.mu.Lock()
 		active := b.sessions[chat]
 		busy := b.running[chat]
-		filesOff := b.filesDisabled[chat]
+		filesOn := b.filesEnabled[chat]
 		b.mu.Unlock()
 		state := "🟢 ready"
 		if busy {
@@ -722,57 +743,208 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 		} else if active {
 			state = "🟢 ready (resumed)"
 		}
-		files := "on"
-		if filesOff {
-			files = "off"
+		files := "off"
+		if filesOn {
+			files = "on"
 		}
-		b.reply(ctx, chat, fmt.Sprintf("Launch: %s\nSession: %s\nFile auto-send: %s",
-			b.cfg.LaunchCommand, state, files))
+		modelLine := ""
+		if b.supportsModelSwitch() {
+			modelLine = "\nModel: " + b.modelLabel(b.modelForChat(chat))
+		}
+		b.reply(ctx, chat, fmt.Sprintf("Launch: %s\nSession: %s\nTurn timeout: %s\nFile auto-send: %s%s",
+			b.cfg.LaunchCommand, state, b.cfg.TurnTimeoutLabel(), files, modelLine))
 	case "yes", "y":
 		// Shorthand for picking option 1 in a numbered menu.
 		b.runTurn(ctx, chat, "1")
 	case "switch":
 		arg := strings.ToLower(strings.TrimSpace(msg.CommandArguments()))
 		if arg == "" {
-			names := make([]string, 0, len(config.KnownPresets))
-			for k := range config.KnownPresets {
-				names = append(names, k)
-			}
-			sort.Strings(names)
-			b.reply(ctx, chat, "Usage: /switch "+strings.Join(names, "  or  /switch "))
+			b.sendSwitchMenu(ctx, chat)
 			return
 		}
-		preset, ok := config.KnownPresets[arg]
-		if !ok {
-			names := make([]string, 0, len(config.KnownPresets))
-			for k := range config.KnownPresets {
-				names = append(names, k)
-			}
-			sort.Strings(names)
-			b.reply(ctx, chat, "Unknown CLI \""+arg+"\". Available: "+strings.Join(names, ", "))
+		b.performSwitch(ctx, chat, arg)
+	case "model", "m":
+		arg := strings.ToLower(strings.TrimSpace(msg.CommandArguments()))
+		if arg == "" {
+			b.sendModelMenu(ctx, chat)
 			return
 		}
-		if err := config.UpdateCLI(b.cfg.SourcePath, preset); err != nil {
-			b.reply(ctx, chat, "❌ Failed to update config: "+err.Error())
-			return
-		}
-		// We rely on os.Exit + LaunchAgent KeepAlive to restart with the new
-		// config. If we're NOT running under launchd (ppid 1) — e.g. a
-		// foreground `tg-cli-bridge run` — exiting would just kill the bridge
-		// with no restart, so update the config and tell the user to restart.
-		if os.Getppid() != 1 {
-			b.reply(ctx, chat, fmt.Sprintf("✅ Config switched to %s, but I'm not running under launchd so I can't auto-restart. Restart me to apply it (then send /new).", arg))
-			return
-		}
-		b.reply(ctx, chat, fmt.Sprintf("✅ Switched to %s. Restarting…\nSend /new after it comes back.", arg))
-		time.Sleep(600 * time.Millisecond) // let the reply flush before exit
-		os.Exit(0)                          // LaunchAgent KeepAlive restarts with new config
+		b.performModelSet(ctx, chat, arg)
 	default:
 		b.reply(ctx, chat, "Unknown command. Try /help.")
 	}
 }
 
 // -- inline-keyboard callbacks --------------------------------------------
+
+var switchPresets = []struct {
+	name  string
+	label string
+}{
+	{"agy", "⚡ AGY"},
+	{"claude", "🤖 Claude"},
+	{"codex", "🧠 Codex"},
+}
+
+// sendSwitchMenu exposes every supported preset as a Telegram button while
+// typed commands such as /switch codex continue to work.
+func (b *Bridge) sendSwitchMenu(ctx context.Context, chat int64) {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(switchPresets))
+	for _, preset := range switchPresets {
+		if _, ok := config.KnownPresets[preset.name]; !ok {
+			continue
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(preset.label, "switch:"+preset.name),
+		))
+	}
+	msg := tgbotapi.NewMessage(chat, "Switch CLI:\nCurrently: "+b.cfg.LaunchCommand+"\n\nTap a button:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	if _, err := b.bot.Send(msg); err != nil {
+		log.Printf("send switch menu failed: %v", err)
+	}
+}
+
+// performSwitch updates only the CLI-specific config and relies on launchd to
+// restart the installed bridge. A foreground run instead asks for a restart.
+func (b *Bridge) performSwitch(ctx context.Context, chat int64, name string) {
+	preset, ok := config.KnownPresets[name]
+	if !ok {
+		names := make([]string, 0, len(config.KnownPresets))
+		for key := range config.KnownPresets {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		b.reply(ctx, chat, "Unknown CLI \""+name+"\". Available: "+strings.Join(names, ", "))
+		return
+	}
+	if err := config.UpdateCLI(b.cfg.SourcePath, preset); err != nil {
+		b.reply(ctx, chat, "❌ Failed to update config: "+err.Error())
+		return
+	}
+	b.setModelForChat(chat, defaultModelChoice)
+	if os.Getppid() != 1 {
+		b.reply(ctx, chat, fmt.Sprintf("✅ Config switched to %s. Restart the foreground bridge to apply it, then send /new.", name))
+		return
+	}
+	b.reply(ctx, chat, fmt.Sprintf("✅ Switched to %s. Restarting…\nSend /new after it comes back.", name))
+	time.Sleep(600 * time.Millisecond)
+	os.Exit(0)
+}
+
+var modelTiers = []struct {
+	name  string
+	label string
+}{
+	{"sonnet", "📋 Sonnet — plan"},
+	{"opus", "🚀 Opus — execute"},
+}
+
+func (b *Bridge) supportsModelSwitch() bool {
+	// Match the actual executable rather than any command containing "claude";
+	// this keeps retired wrappers from silently inheriting Claude-only flags.
+	parts := strings.Fields(b.cfg.LaunchCommand)
+	return len(parts) > 0 && strings.EqualFold(filepath.Base(parts[0]), "claude")
+}
+
+func (b *Bridge) launchCommandForChat(chat int64) string {
+	command := b.cfg.LaunchCommand
+	if model := b.modelForChat(chat); model != "" {
+		command += " --model " + model
+	}
+	return command
+}
+
+func (b *Bridge) modelForChat(chat int64) string {
+	if !b.supportsModelSwitch() {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if model := b.modelChoice[chat]; model != "" {
+		return model
+	}
+	return defaultModelChoice
+}
+
+func (b *Bridge) setModelForChat(chat int64, model string) {
+	b.mu.Lock()
+	b.modelChoice[chat] = model
+	b.mu.Unlock()
+}
+
+func (b *Bridge) modelLabel(model string) string {
+	for _, tier := range modelTiers {
+		if tier.name == model {
+			return tier.label
+		}
+	}
+	return model
+}
+
+func (b *Bridge) sendModelMenu(ctx context.Context, chat int64) {
+	if !b.supportsModelSwitch() {
+		b.reply(ctx, chat, "Model switching is configured only for Claude. Use /switch first.")
+		return
+	}
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(modelTiers))
+	for _, tier := range modelTiers {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(tier.label, "model:"+tier.name),
+		))
+	}
+	msg := tgbotapi.NewMessage(chat, "Model:\nCurrently: "+b.modelLabel(b.modelForChat(chat))+"\n\nTap a button:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	if _, err := b.bot.Send(msg); err != nil {
+		log.Printf("send model menu failed: %v", err)
+	}
+}
+
+func (b *Bridge) validModel(model string) bool {
+	for _, tier := range modelTiers {
+		if tier.name == model {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bridge) performModelSet(ctx context.Context, chat int64, model string) {
+	if !b.supportsModelSwitch() {
+		b.reply(ctx, chat, "Model switching is configured only for Claude. Use /switch first.")
+		return
+	}
+	if !b.validModel(model) {
+		b.reply(ctx, chat, "Unknown model \""+model+"\". Use /model and tap a button.")
+		return
+	}
+	b.setModelForChat(chat, model)
+	b.reply(ctx, chat, "✅ Model set to "+b.modelLabel(model)+". Session kept.")
+}
+
+func (b *Bridge) handleModelCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+	model := strings.TrimPrefix(cb.Data, "model:")
+	_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, "Model → "+model))
+	if cb.Message == nil || !b.supportsModelSwitch() || !b.validModel(model) {
+		return
+	}
+	chat := cb.Message.Chat.ID
+	b.setModelForChat(chat, model)
+	edit := tgbotapi.NewEditMessageText(chat, cb.Message.MessageID, "✓ Model: "+b.modelLabel(model)+"\n\nSession kept.")
+	_, _ = b.bot.Request(edit)
+}
+
+func (b *Bridge) handleSwitchCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+	name := strings.TrimPrefix(cb.Data, "switch:")
+	_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, "Switching to "+name+"…"))
+	if cb.Message == nil {
+		return
+	}
+	chat := cb.Message.Chat.ID
+	edit := tgbotapi.NewEditMessageText(chat, cb.Message.MessageID, "✓ Switching to "+name+"…")
+	_, _ = b.bot.Request(edit)
+	b.performSwitch(ctx, chat, name)
+}
 
 func (b *Bridge) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if cb.From == nil {
@@ -781,6 +953,14 @@ func (b *Bridge) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery)
 	if _, ok := b.cfg.AllowedUserIDs[cb.From.ID]; !ok {
 		log.Printf("Unauthorized callback from user_id=%d", cb.From.ID)
 		_, _ = b.bot.Request(tgbotapi.NewCallback(cb.ID, "Unauthorized"))
+		return
+	}
+	if strings.HasPrefix(cb.Data, "switch:") {
+		b.handleSwitchCallback(ctx, cb)
+		return
+	}
+	if strings.HasPrefix(cb.Data, "model:") {
+		b.handleModelCallback(ctx, cb)
 		return
 	}
 	const prefix = "menu:"
@@ -888,7 +1068,7 @@ func truncate(s string, max int) string {
 func menuFingerprint(m *output.Menu) string {
 	var sb strings.Builder
 	for _, opt := range m.Options {
-		fmt.Fprintf(&sb, "%d:%s\n", opt.Number, opt.Label)
+		_, _ = fmt.Fprintf(&sb, "%d:%s\n", opt.Number, opt.Label)
 	}
 	return sb.String()
 }
@@ -900,7 +1080,7 @@ func buildMenuText(m *output.Menu) string {
 		sb.WriteString("\n\n")
 	}
 	for _, opt := range m.Options {
-		fmt.Fprintf(&sb, "%d. %s\n", opt.Number, opt.Label)
+		_, _ = fmt.Fprintf(&sb, "%d. %s\n", opt.Number, opt.Label)
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -931,7 +1111,7 @@ func (b *Bridge) handleIncomingFile(msg *tgbotapi.Message) (string, error) {
 	if msg.Document != nil {
 		fileID = msg.Document.FileID
 		fileName = msg.Document.FileName
-	} else if msg.Photo != nil && len(msg.Photo) > 0 {
+	} else if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		fileID = photo.FileID
 		fileName = fmt.Sprintf("photo_%d.jpg", time.Now().Unix())
@@ -962,17 +1142,19 @@ func (b *Bridge) handleIncomingFile(msg *tgbotapi.Message) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("downloading file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	destPath := filepath.Join(uploadsDir, fileName)
 	out, err := os.Create(destPath)
 	if err != nil {
 		return "", fmt.Errorf("creating local file: %w", err)
 	}
-	defer out.Close()
-
 	if _, err := io.Copy(out, resp.Body); err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("saving file content: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("closing local file: %w", err)
 	}
 
 	return destPath, nil

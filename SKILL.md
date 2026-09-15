@@ -1,6 +1,6 @@
 ---
 name: tg-cli-bridge
-description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive any agentic CLI (Gemini CLI, AGY/Antigravity, Claude Code) from your phone. Each message you send spawns the CLI with your prompt, waits for it to finish, and replies with the clean output. Supports session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
+description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive AGY/Antigravity, Claude Code, Codex, or another headless agent CLI from your phone. Each message spawns the CLI with your prompt, waits for it to finish, and replies with clean output. Supports latest-session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
 ---
 
 # tg-cli-bridge — installation skill
@@ -12,7 +12,7 @@ an agentic CLI from Telegram.
 
 The user wants any of:
 
-- "Control my Gemini / AGY / Claude from my phone"
+- "Control my AGY / Claude / Codex from my phone"
 - "Send prompts to my agent via Telegram"
 - "Check my email / Google Drive from Telegram"
 - "Set up a Telegram bot that talks to my CLI agent"
@@ -28,8 +28,8 @@ A working setup where:
 3. The agent's output is cleaned up (ANSI stripped, tool-call boxes removed)
    and sent back as a Telegram reply.
 4. A **macOS LaunchAgent** keeps the bridge running across reboots and crashes.
-5. Session continuity is maintained via `--resume` or `--continue` flags so
-   the agent remembers the conversation.
+5. Session continuity uses the selected CLI's latest-session argument, with
+   the isolation limitation described below.
 
 ## Prerequisites — confirm before installing
 
@@ -43,9 +43,9 @@ A working setup where:
 - **The user's numeric Telegram user ID** — have them message `@userinfobot`.
 - **The agent CLI they want to drive**, installed and working in a terminal
   first:
-  - Gemini CLI: `npm install -g @google/gemini-cli`
   - AGY: `curl -fsSL https://get.agy.app | bash` (or their installer)
   - Claude Code: per Anthropic install docs
+  - Codex CLI: install and authenticate it according to the OpenAI docs
 
 ## Install steps
 
@@ -76,13 +76,20 @@ The `init` wizard handles this, but for reference:
 
 | CLI | launch_command | prompt_flag | resume_args |
 |-----|---------------|-------------|-------------|
-| Gemini CLI | `gemini --yolo` | `--prompt` | `["--resume","latest"]` |
 | AGY | `agy --dangerously-skip-permissions` | `--print` | `["--continue"]` |
-| Claude Code | `claude` | `--print` | — |
+| Claude Code | `claude --dangerously-skip-permissions` | `--print` | `["--continue"]` |
+| Codex CLI | `codex exec --sandbox workspace-write` | `--` | `["resume","--last"]` |
 
 **AGY note:** AGY reprints the full conversation history in `--continue` mode.
 The bridge handles this automatically by diffing each turn's output against
 the previous one.
+
+For a custom CLI, put fixed engine/model arguments in `launch_command`, use
+the one-shot flag as `prompt_flag` (`--` for a positional prompt), and put the
+latest-session arguments in `resume_args`. The command is split into arguments,
+not evaluated by a shell, so do not use pipes, redirects, or shell assignments.
+Use `[session.env]` for required environment variables. A negative
+`turn_timeout_seconds` disables the deadline and should be used deliberately.
 
 ## Things to watch for
 
@@ -94,9 +101,18 @@ the previous one.
 - **PATH inside the spawned process is set explicitly** from config
   `[session].path` (or the default which covers Homebrew/local bins). If the
   CLI isn't found, add its directory to `path` in `config.toml`.
-- **Session state is per-chat in memory.** If the bridge restarts, the next
-  message starts a new session (no `--resume`). The agent usually recovers
-  gracefully.
+- **Latest-session selection is not isolated per Telegram chat.** The bridge
+  remembers only whether a chat has started; the CLI chooses its own newest
+  saved conversation. Use one engine and one Telegram chat per `working_dir`,
+  do not run the same CLI manually there, and do not run different engines
+  against the same files simultaneously. After `/switch`, send `/new`.
+- **The macOS installer manages one LaunchAgent.** Run one background bridge
+  at a time. Concurrent bots require separate tokens, configs, working
+  directories, and manually managed service identities.
+- **File auto-send starts off.** Enable it per chat with `/files on` only when
+  the agent is expected to create files that should be returned to Telegram.
+- **`/switch` and `/model` have buttons.** Typed forms such as `/switch codex`
+  still work; `/model` applies only to the Claude launch command.
 
 ## Troubleshooting flow
 

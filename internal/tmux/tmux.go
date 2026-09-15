@@ -53,10 +53,14 @@ func New(cfg *config.Config) *Session {
 //     "default shell is now zsh" notice on every login, which used to show up
 //     at the top of the captured pane.
 func (s *Session) envForTmux() []string {
-	return append(os.Environ(),
+	env := append(os.Environ(),
 		"PATH="+s.cfg.PathEnv,
 		"BASH_SILENCE_DEPRECATION_WARNING=1",
 	)
+	for key, value := range s.cfg.Env {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 // Exists reports whether the named session currently exists.
@@ -96,6 +100,11 @@ func (s *Session) Ensure() error {
 	// Step 2: force PATH inside the shell. Don't rely on shell rc files.
 	if err := s.sendLine(fmt.Sprintf("export PATH=%s", shellQuote(s.cfg.PathEnv))); err != nil {
 		return fmt.Errorf("setting PATH: %w", err)
+	}
+	for key, value := range s.cfg.Env {
+		if err := s.sendLine(fmt.Sprintf("export %s=%s", key, shellQuote(value))); err != nil {
+			return fmt.Errorf("setting env %s: %w", key, err)
+		}
 	}
 	time.Sleep(100 * time.Millisecond)
 

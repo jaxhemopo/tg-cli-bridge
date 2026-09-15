@@ -2,6 +2,9 @@ package rpc
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +49,75 @@ func TestRun_RespectsResumeFlag(t *testing.T) {
 	}
 }
 
+func TestCommandArgs_AgentShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       Options
+		wantBinary string
+		wantArgs   []string
+	}{
+		{
+			name: "AGY new session",
+			opts: Options{
+				LaunchCommand: "agy --dangerously-skip-permissions",
+				PromptFlag:    "--print",
+				Prompt:        "hello world",
+			},
+			wantBinary: "agy",
+			wantArgs:   []string{"--dangerously-skip-permissions", "--print", "hello world"},
+		},
+		{
+			name: "AGY resumed session",
+			opts: Options{
+				LaunchCommand: "agy --dangerously-skip-permissions",
+				PromptFlag:    "--print",
+				ResumeArgs:    []string{"--continue"},
+				Resume:        true,
+				Prompt:        "hello world",
+			},
+			wantBinary: "agy",
+			wantArgs:   []string{"--dangerously-skip-permissions", "--continue", "--print", "hello world"},
+		},
+		{
+			name: "Codex new session with positional prompt",
+			opts: Options{
+				LaunchCommand: "codex exec --sandbox workspace-write",
+				PromptFlag:    "--",
+				Prompt:        "hello world",
+			},
+			wantBinary: "codex",
+			wantArgs:   []string{"exec", "--sandbox", "workspace-write", "--", "hello world"},
+		},
+		{
+			name: "Codex resumed session",
+			opts: Options{
+				LaunchCommand: "codex exec --sandbox workspace-write",
+				PromptFlag:    "--",
+				ResumeArgs:    []string{"resume", "--last"},
+				Resume:        true,
+				Prompt:        "hello world",
+			},
+			wantBinary: "codex",
+			wantArgs:   []string{"exec", "--sandbox", "workspace-write", "resume", "--last", "--", "hello world"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBinary, gotArgs, err := commandArgs(tt.opts)
+			if err != nil {
+				t.Fatalf("commandArgs: %v", err)
+			}
+			if gotBinary != tt.wantBinary {
+				t.Errorf("binary = %q, want %q", gotBinary, tt.wantBinary)
+			}
+			if !reflect.DeepEqual(gotArgs, tt.wantArgs) {
+				t.Errorf("args = %#v, want %#v", gotArgs, tt.wantArgs)
+			}
+		})
+	}
+}
+
 func TestRun_RejectsEmptyLaunchCommand(t *testing.T) {
 	res := Run(context.Background(), Options{Prompt: "x", Timeout: time.Second})
 	if res.Err == nil {
@@ -53,18 +125,63 @@ func TestRun_RejectsEmptyLaunchCommand(t *testing.T) {
 	}
 }
 
+func TestRun_PassesConfiguredEnvironment(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "env-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nprintf '%s' \"$TG_CLI_TEST_VALUE\"\n"), 0o700); err != nil {
+		t.Fatalf("write env agent: %v", err)
+	}
+	res := Run(context.Background(), Options{
+		LaunchCommand: agent,
+		Prompt:        "ignored",
+		Timeout:       5 * time.Second,
+		Env:           map[string]string{"TG_CLI_TEST_VALUE": "passed"},
+	})
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if res.Stdout != "passed" {
+		t.Fatalf("Stdout = %q", res.Stdout)
+	}
+}
+
+func TestRun_ResolvesExecutableFromConfiguredPATH(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "path-only-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nprintf found\n"), 0o700); err != nil {
+		t.Fatalf("write path agent: %v", err)
+	}
+	res := Run(context.Background(), Options{
+		LaunchCommand: "path-only-agent",
+		PathEnv:       dir,
+		Prompt:        "ignored",
+		Timeout:       5 * time.Second,
+	})
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if res.Stdout != "found" {
+		t.Fatalf("Stdout = %q", res.Stdout)
+	}
+}
+
 func TestRun_HonoursTimeout(t *testing.T) {
-	// `sleep` will run longer than our timeout.
+	// A tiny stand-in agent ignores its argv and runs longer than our timeout.
+	agent := filepath.Join(t.TempDir(), "slow-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nexec sleep 2\n"), 0o700); err != nil {
+		t.Fatalf("write slow agent: %v", err)
+	}
 	start := time.Now()
 	res := Run(context.Background(), Options{
-		LaunchCommand: "sleep",
-		PromptFlag:    "",
-		Prompt:        "2",
+		LaunchCommand: agent,
+		Prompt:        "ignored",
 		Timeout:       200 * time.Millisecond,
 	})
 	elapsed := time.Since(start)
 	if res.Err == nil {
 		t.Fatal("expected timeout error")
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut = false, want true")
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Run blocked %v; should have aborted near 200ms", elapsed)

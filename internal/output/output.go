@@ -231,8 +231,8 @@ func classifyLine(line string) int {
 	if trimmed == "" {
 		return 0
 	}
-	// Lead char-based tool-call markers used by Antigravity / Claude Code /
-	// Gemini CLI / etc. (including black small triangles for thoughts).
+	// Lead char-based tool-call markers used by AGY / Claude Code / Codex /
+	// etc. (including black small triangles for thoughts).
 	if r, _ := utf8.DecodeRuneInString(trimmed); r != utf8.RuneError {
 		switch r {
 		case '●', '▶', '►', '✓', '✗', '✔', '✘', '◆', '◇', '○', '◯', '⚡', '⏺', '▸', '◂', '▾', '▴', '✦', '✧', '✱', '✲', '✳', '❯', '»':

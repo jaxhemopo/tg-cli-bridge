@@ -13,20 +13,26 @@ allowed_user_ids = [123456789]
 
 [session]
 # Command to launch your agent CLI. Examples:
-#   "gemini --yolo"                          — Gemini CLI, auto-approve all tools
 #   "agy --dangerously-skip-permissions"     — AGY / Antigravity
-#   "claude"                                 — Claude Code
+#   "claude --dangerously-skip-permissions"  — Claude Code
+#   "codex exec --sandbox workspace-write"   — Codex CLI
 #   "bash"                                   — plain shell (useful for testing)
-launch_command = "gemini --yolo"
+launch_command = "agy --dangerously-skip-permissions"
 
 # Directory the agent launches in. Use a full path, ~ is not expanded.
-# Put a GEMINI.md (or equivalent) here to give the agent context about
-# what tools it has access to.
+# Put the instruction file recognized by your engine here (for example,
+# AGENTS.md for Codex or CLAUDE.md for Claude Code).
 working_dir = "/Users/YOUR_USERNAME/workspace"
 
 # Optional: override the PATH the agent process inherits.
-# Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
+# Default covers the ChatGPT app's bundled Codex CLI, Homebrew, ~/.local/bin,
+# ~/.cargo/bin, and ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Optional environment variables passed to the agent process. Prefer a
+# private config file and never commit real keys.
+# [session.env]
+# EXAMPLE_API_KEY = "replace-me"
 
 
 [bridge]
@@ -34,14 +40,18 @@ working_dir = "/Users/YOUR_USERNAME/workspace"
 max_message_chars = 3800
 
 # Flag the CLI uses for a headless/non-interactive prompt.
-# Default is --prompt which works for Gemini CLI and Claude Code.
-# AGY uses --print.
-# prompt_flag = "--print"
+# AGY and Claude use --print. Codex accepts a positional prompt, so use --
+# to end option parsing before the Telegram message.
+prompt_flag = "--print"
+# prompt_flag = "--"  # Codex
 
-# Args appended to resume a previous session.
-# Default is ["--resume", "latest"] which works for Gemini CLI.
-# AGY uses ["--continue"].
-# resume_args = ["--continue"]
+# Args inserted after launch_command to resume the CLI's latest session.
+resume_args = ["--continue"]
+# resume_args = ["resume", "--last"]  # Codex
+# resume_args = []                      # no session continuation
+
+# The bridge does not store conversation IDs. Latest-session selection is not
+# isolated per Telegram chat; use one engine and chat per working directory.
 
 # How long to wait for one agent invocation before killing it (seconds).
 # Default is 600 (10 minutes). Increase for very long-running tasks.
