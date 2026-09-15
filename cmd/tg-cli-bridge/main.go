@@ -1,5 +1,5 @@
-// Command tg-cli-bridge connects an agentic CLI (AGY, Claude Code, Codex, a
-// Claude-compatible GLM wrapper, or a custom command) to a Telegram chat.
+// Command tg-cli-bridge connects an agentic CLI (AGY, Claude Code, Codex, or a
+// custom command) to a Telegram chat.
 //
 // Subcommands:
 //
@@ -128,12 +128,6 @@ var cliPresets = []cliPreset{
 		launchCmd:  "codex exec --sandbox workspace-write",
 		promptFlag: "--",
 		resumeArgs: []string{"resume", "--last"},
-	},
-	{
-		label:      "Claude Code + GLM  (claude-glm wrapper on PATH)",
-		launchCmd:  "claude-glm --dangerously-skip-permissions",
-		promptFlag: "--print",
-		resumeArgs: []string{"--continue"},
 	},
 	{
 		label: "Other / custom",

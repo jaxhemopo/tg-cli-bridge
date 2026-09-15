@@ -1,7 +1,7 @@
 # tg-cli-bridge contributor guide
 
 This repository builds a Go binary that connects Telegram to AGY, Claude Code,
-Codex, a Claude-compatible GLM wrapper, or another headless agent CLI.
+Codex, or another headless agent CLI.
 
 ## Validate changes
 

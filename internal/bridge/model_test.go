@@ -6,22 +6,38 @@ import (
 	"github.com/jaxhemopo/tg-cli-bridge/internal/config"
 )
 
-func TestSwitchMenuIncludesCodex(t *testing.T) {
-	for _, preset := range switchPresets {
-		if preset.name == "codex" {
-			return
+func TestSwitchMenuHasOnlySupportedPresets(t *testing.T) {
+	want := []string{"agy", "claude", "codex"}
+	if len(switchPresets) != len(want) {
+		t.Fatalf("switch menu has %d presets, want %d", len(switchPresets), len(want))
+	}
+	for i, preset := range switchPresets {
+		if preset.name != want[i] {
+			t.Errorf("switch preset %d = %q, want %q", i, preset.name, want[i])
 		}
 	}
-	t.Fatal("switch menu does not include Codex")
 }
 
-func TestModelSelectionOnlyAppliesToClaudeWrappers(t *testing.T) {
+func TestModelMenuHasOnlyClaudeTiers(t *testing.T) {
+	want := []string{"sonnet", "opus"}
+	if len(modelTiers) != len(want) {
+		t.Fatalf("model menu has %d tiers, want %d", len(modelTiers), len(want))
+	}
+	for i, tier := range modelTiers {
+		if tier.name != want[i] {
+			t.Errorf("model tier %d = %q, want %q", i, tier.name, want[i])
+		}
+	}
+}
+
+func TestModelSelectionOnlyAppliesToClaude(t *testing.T) {
 	tests := []struct {
 		command string
 		want    bool
 	}{
 		{"claude --dangerously-skip-permissions", true},
-		{"claude-glm --dangerously-skip-permissions", true},
+		{"/opt/homebrew/bin/claude --dangerously-skip-permissions", true},
+		{"claude-wrapper --dangerously-skip-permissions", false},
 		{"agy --dangerously-skip-permissions", false},
 		{"codex exec --sandbox workspace-write", false},
 	}

@@ -1,6 +1,6 @@
 ---
 name: tg-cli-bridge
-description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive AGY/Antigravity, Claude Code, Codex, a Claude-compatible GLM wrapper, or another headless agent CLI from your phone. Each message spawns the CLI with your prompt, waits for it to finish, and replies with clean output. Supports latest-session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
+description: Install and configure tg-cli-bridge — a Telegram bot that lets you drive AGY/Antigravity, Claude Code, Codex, or another headless agent CLI from your phone. Each message spawns the CLI with your prompt, waits for it to finish, and replies with clean output. Supports latest-session continuity, inline menu buttons, and live status updates while the agent works. Single static Go binary, macOS LaunchAgent included.
 ---
 
 # tg-cli-bridge — installation skill
@@ -79,7 +79,6 @@ The `init` wizard handles this, but for reference:
 | AGY | `agy --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 | Claude Code | `claude --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 | Codex CLI | `codex exec --sandbox workspace-write` | `--` | `["resume","--last"]` |
-| Claude + GLM wrapper | `claude-glm --dangerously-skip-permissions` | `--print` | `["--continue"]` |
 
 **AGY note:** AGY reprints the full conversation history in `--continue` mode.
 The bridge handles this automatically by diffing each turn's output against
@@ -113,7 +112,7 @@ Use `[session.env]` for required environment variables. A negative
 - **File auto-send starts off.** Enable it per chat with `/files on` only when
   the agent is expected to create files that should be returned to Telegram.
 - **`/switch` and `/model` have buttons.** Typed forms such as `/switch codex`
-  still work; `/model` applies only to Claude-compatible launch commands.
+  still work; `/model` applies only to the Claude launch command.
 
 ## Troubleshooting flow
 

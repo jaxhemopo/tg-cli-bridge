@@ -136,11 +136,6 @@ var KnownPresets = map[string]CLIPreset{
 		PromptFlag: "--",
 		ResumeArgs: []string{"resume", "--last"},
 	},
-	"glm": {
-		LaunchCmd:  "claude-glm --dangerously-skip-permissions",
-		PromptFlag: "--print",
-		ResumeArgs: []string{"--continue"},
-	},
 }
 
 // UpdateCLI rewrites the CLI-specific fields in an existing config file while
@@ -371,7 +366,6 @@ allowed_user_ids = [123456789]
 #   "agy --dangerously-skip-permissions"     — AGY / Antigravity
 #   "claude --dangerously-skip-permissions"  — Claude Code
 #   "codex exec --sandbox workspace-write"   — Codex CLI
-#   "claude-glm --dangerously-skip-permissions" — local GLM wrapper on PATH
 #   "bash"                                   — plain shell (useful for testing)
 launch_command = "agy --dangerously-skip-permissions"
 

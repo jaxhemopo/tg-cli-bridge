@@ -1,7 +1,7 @@
 # tg-cli-bridge
 
 Go binary that bridges a Telegram bot to an agentic CLI (AGY/Antigravity,
-Claude Code, Codex, a Claude-compatible GLM wrapper, or a custom command).
+Claude Code, Codex, or a custom command).
 
 ## Build
 
@@ -59,8 +59,8 @@ not run multiple chats or CLI processes against the same working directory.
 - **Prose-only output** — `output.FormatForTelegram` classifies lines as prose vs code/tool-call banners. Only prose reaches Telegram so tool-call boxes don't pollute the chat.
 - **Status bubble** — single ⏳ message edits in-place as agent stdout reveals what it's doing (email, drive, shell, etc.). Deleted before the real reply lands so the chat stays clean.
 - **`DiffSince`** — some CLIs (AGY `--continue`) reprint the entire conversation history on every invocation. `DiffSince(prev, curr)` extracts only the new content.
-- **`KnownPresets`** in `config.go` — maps short names (`agy`, `claude`,
-  `codex`, `glm`) to the right flags. Powers both the `init` wizard and
+- **`KnownPresets`** in `config.go` — maps short names (`agy`, `claude`, and
+  `codex`) to the right flags. Powers both the `init` wizard and
   `/switch` buttons.
 - **Positional prompts** — set `prompt_flag` to `--`; the separator ends
   option parsing before the prompt. Codex uses this command shape.
@@ -75,7 +75,7 @@ not run multiple chats or CLI processes against the same working directory.
 | `/retry` | Re-run this chat's last message |
 | `/files on\|off` | Toggle sending newly created files; off by default |
 | `/switch [name]` | Open buttons or switch CLI globally. A LaunchAgent run restarts automatically; foreground mode needs a manual restart. |
-| `/model`, `/m` | Select the configured Claude/GLM model tier |
+| `/model`, `/m` | Select the configured Claude model tier |
 | `/status` | Show current launch command and this chat's bridge state |
 | `/yes` | Send "1" to a numbered menu |
 | `/help` | List commands |

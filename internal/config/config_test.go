@@ -94,7 +94,7 @@ bot_token = "test:token"
 allowed_user_ids = [42]
 
 [session]
-launch_command = "claude-glm"
+launch_command = "agy"
 
 [session.env]
 API_BASE = "https://example.test"
@@ -284,11 +284,6 @@ func TestKnownPresets(t *testing.T) {
 			PromptFlag: "--",
 			ResumeArgs: []string{"resume", "--last"},
 		},
-		"glm": {
-			LaunchCmd:  "claude-glm --dangerously-skip-permissions",
-			PromptFlag: "--print",
-			ResumeArgs: []string{"--continue"},
-		},
 	}
 	if len(KnownPresets) != len(tests) {
 		t.Fatalf("KnownPresets has %d entries, want %d", len(KnownPresets), len(tests))
@@ -311,10 +306,10 @@ func TestUpdateCLI_PreservesUnlimitedTimeout(t *testing.T) {
 	path := writeConfig(t, dir, Render(RenderParams{
 		BotToken:   "test:token",
 		UserID:     42,
-		LaunchCmd:  KnownPresets["glm"].LaunchCmd,
+		LaunchCmd:  KnownPresets["claude"].LaunchCmd,
 		WorkingDir: dir,
-		PromptFlag: KnownPresets["glm"].PromptFlag,
-		ResumeArgs: KnownPresets["glm"].ResumeArgs,
+		PromptFlag: KnownPresets["claude"].PromptFlag,
+		ResumeArgs: KnownPresets["claude"].ResumeArgs,
 	})+"\nturn_timeout_seconds = -1\n")
 
 	if err := UpdateCLI(path, KnownPresets["agy"]); err != nil {

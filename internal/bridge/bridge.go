@@ -51,7 +51,7 @@ type Bridge struct {
 	// Per-chat chats that have enabled auto-sending agent-created files.
 	// Default is off so a new bot cannot unexpectedly upload workspace files.
 	filesEnabled map[int64]bool
-	// Per-chat Claude/GLM model selection. The choice is intentionally runtime
+	// Per-chat Claude model selection. The choice is intentionally runtime
 	// state only; /new resets it to the default.
 	modelChoice map[int64]string
 }
@@ -81,8 +81,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		{Command: "kill", Description: "Force-stop a stuck command"},
 		{Command: "retry", Description: "Re-run your last message"},
 		{Command: "switch", Description: "Switch CLI (tap to pick)"},
-		{Command: "model", Description: "Select a Claude/GLM model"},
-		{Command: "m", Description: "Select a Claude/GLM model (shortcut)"},
+		{Command: "model", Description: "Select a Claude model"},
+		{Command: "m", Description: "Select a Claude model (shortcut)"},
 		{Command: "files", Description: "Toggle auto-sending agent-created files (/files on|off)"},
 		{Command: "status", Description: "Show bridge state"},
 		{Command: "yes", Description: "Pick option 1 from a numbered menu"},
@@ -666,7 +666,7 @@ func (b *Bridge) dispatchCommand(ctx context.Context, msg *tgbotapi.Message) {
 				"/kill — force-stop a stuck command\n"+
 				"/retry — re-run your last message\n"+
 				"/switch — tap to choose "+strings.Join(names, ", ")+"\n"+
-				"/model or /m — choose a Claude/GLM model\n"+
+				"/model or /m — choose a Claude model\n"+
 				"/files on|off — toggle auto-sending files the agent creates\n"+
 				"/yes — pick option 1 from a numbered menu\n"+
 				"/status — show bridge state")
@@ -784,7 +784,6 @@ var switchPresets = []struct {
 	{"agy", "⚡ AGY"},
 	{"claude", "🤖 Claude"},
 	{"codex", "🧠 Codex"},
-	{"glm", "🔮 GLM"},
 }
 
 // sendSwitchMenu exposes every supported preset as a Telegram button while
@@ -839,11 +838,13 @@ var modelTiers = []struct {
 }{
 	{"sonnet", "📋 Sonnet — plan"},
 	{"opus", "🚀 Opus — execute"},
-	{"fable", "🎭 Fable"},
 }
 
 func (b *Bridge) supportsModelSwitch() bool {
-	return strings.Contains(strings.ToLower(b.cfg.LaunchCommand), "claude")
+	// Match the actual executable rather than any command containing "claude";
+	// this keeps retired wrappers from silently inheriting Claude-only flags.
+	parts := strings.Fields(b.cfg.LaunchCommand)
+	return len(parts) > 0 && strings.EqualFold(filepath.Base(parts[0]), "claude")
 }
 
 func (b *Bridge) launchCommandForChat(chat int64) string {
@@ -883,7 +884,7 @@ func (b *Bridge) modelLabel(model string) string {
 
 func (b *Bridge) sendModelMenu(ctx context.Context, chat int64) {
 	if !b.supportsModelSwitch() {
-		b.reply(ctx, chat, "Model switching is configured only for Claude and GLM. Use /switch first.")
+		b.reply(ctx, chat, "Model switching is configured only for Claude. Use /switch first.")
 		return
 	}
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(modelTiers))
@@ -910,7 +911,7 @@ func (b *Bridge) validModel(model string) bool {
 
 func (b *Bridge) performModelSet(ctx context.Context, chat int64, model string) {
 	if !b.supportsModelSwitch() {
-		b.reply(ctx, chat, "Model switching is configured only for Claude and GLM. Use /switch first.")
+		b.reply(ctx, chat, "Model switching is configured only for Claude. Use /switch first.")
 		return
 	}
 	if !b.validModel(model) {
