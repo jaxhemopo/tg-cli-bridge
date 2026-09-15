@@ -25,7 +25,8 @@ launch_command = "agy --dangerously-skip-permissions"
 working_dir = "/Users/YOUR_USERNAME/workspace"
 
 # Optional: override the PATH the agent process inherits.
-# Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
+# Default covers the ChatGPT app's bundled Codex CLI, Homebrew, ~/.local/bin,
+# ~/.cargo/bin, and ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Optional environment variables passed to the agent process. Prefer a

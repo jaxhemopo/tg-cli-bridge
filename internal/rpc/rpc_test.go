@@ -144,6 +144,26 @@ func TestRun_PassesConfiguredEnvironment(t *testing.T) {
 	}
 }
 
+func TestRun_ResolvesExecutableFromConfiguredPATH(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "path-only-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nprintf found\n"), 0o700); err != nil {
+		t.Fatalf("write path agent: %v", err)
+	}
+	res := Run(context.Background(), Options{
+		LaunchCommand: "path-only-agent",
+		PathEnv:       dir,
+		Prompt:        "ignored",
+		Timeout:       5 * time.Second,
+	})
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if res.Stdout != "found" {
+		t.Fatalf("Stdout = %q", res.Stdout)
+	}
+}
+
 func TestRun_HonoursTimeout(t *testing.T) {
 	// A tiny stand-in agent ignores its argv and runs longer than our timeout.
 	agent := filepath.Join(t.TempDir(), "slow-agent")

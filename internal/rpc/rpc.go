@@ -15,7 +15,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -109,6 +111,10 @@ func Run(ctx context.Context, opts Options) Result {
 	if err != nil {
 		return Result{Err: err}
 	}
+	binary, err = resolveBinary(binary, opts.PathEnv)
+	if err != nil {
+		return Result{Err: err}
+	}
 
 	cctx := ctx
 	cancel := func() {}
@@ -163,6 +169,29 @@ func Run(ctx context.Context, opts Options) Result {
 		TimedOut: cctx.Err() == context.DeadlineExceeded,
 		Err:      err,
 	}
+}
+
+// resolveBinary uses the same configured PATH that the child process will
+// inherit. launchd has a deliberately small PATH, so resolving first against
+// the parent environment would reject otherwise valid agent installations.
+func resolveBinary(name, pathEnv string) (string, error) {
+	if filepath.Base(name) != name {
+		return name, nil
+	}
+	if pathEnv == "" {
+		return exec.LookPath(name)
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("rpc: executable %q not found in configured PATH", name)
 }
 
 // commandArgs builds the exact argv passed to the agent. It is separate from

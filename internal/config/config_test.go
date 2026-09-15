@@ -260,10 +260,13 @@ func TestExampleConfig_MatchesCheckedInTemplate(t *testing.T) {
 	}
 }
 
-func TestDefaultPATH_HasHomebrew(t *testing.T) {
+func TestDefaultPATH_HasAgentInstallLocations(t *testing.T) {
 	p := DefaultPATH()
 	if !strings.Contains(p, "/opt/homebrew/bin") {
 		t.Errorf("DefaultPATH missing homebrew: %s", p)
+	}
+	if !strings.Contains(p, "/Applications/ChatGPT.app/Contents/Resources") {
+		t.Errorf("DefaultPATH missing bundled Codex CLI: %s", p)
 	}
 }
 

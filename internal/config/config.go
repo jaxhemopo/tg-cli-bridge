@@ -185,12 +185,13 @@ func DefaultPath() string {
 	return filepath.Join(home, ".config", "tg-cli-bridge", "config.toml")
 }
 
-// DefaultPATH returns a sensible PATH for the tmux shell. Includes Antigravity,
-// Homebrew, common user bins.
+// DefaultPATH returns a sensible PATH for agent processes. It includes common
+// standalone installs plus the Codex executable bundled with the ChatGPT app.
 func DefaultPATH() string {
 	home, _ := os.UserHomeDir()
 	parts := []string{
 		filepath.Join(home, ".antigravity", "antigravity", "bin"),
+		"/Applications/ChatGPT.app/Contents/Resources",
 		"/opt/homebrew/bin",
 		"/usr/local/bin",
 		"/usr/bin",
@@ -375,7 +376,8 @@ launch_command = "agy --dangerously-skip-permissions"
 working_dir = "/Users/YOUR_USERNAME/workspace"
 
 # Optional: override the PATH the agent process inherits.
-# Default covers Homebrew, ~/.local/bin, ~/.cargo/bin, ~/.bun/bin.
+# Default covers the ChatGPT app's bundled Codex CLI, Homebrew, ~/.local/bin,
+# ~/.cargo/bin, and ~/.bun/bin.
 # path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Optional environment variables passed to the agent process. Prefer a
